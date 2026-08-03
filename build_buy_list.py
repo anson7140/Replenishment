@@ -253,6 +253,16 @@ def compute(df, vtype):
         + df["Location_InTransit"] + df["Location_OnOrder"]
     ).astype(int)
     df["Buy Qty"] = (df["Target Qty"] - df["Position"]).clip(lower=0).astype(int)
+
+    # 15MP is the NE overflow hub: expose its onhand+intransit per SKU on the
+    # other NE warehouses' rows, so a transfer can replace a buy when it covers.
+    hub = df[(df["Region"] == "Northeast") & (df["Warehouse"] == "15MP")]
+    avail15 = (hub["Location_Onhand"] + hub["Location_InTransit"]).groupby(
+        hub["ItemNo"]).sum()
+    df["15MP Avail"] = np.where(
+        (df["Region"] == "Northeast") & (df["Warehouse"] != "15MP"),
+        df["ItemNo"].map(avail15).fillna(0), np.nan)
+
     df.attrs["demand_modes"] = modes
     return df
 
@@ -296,8 +306,8 @@ def write_excel(df, buys, warns, out_path):
             "Secondary Vendor", "ADU", "Seasonal Index", "Demand ADU",
             "Lead Days", "Safety Days", "Target Days", "Target Qty",
             "Location_Onhand", "Location_OnOnDock", "Location_InTransit",
-            "Location_OnOrder", "Position", "Buy Qty", "Volume", "PY Volume",
-            "Volume_Prior Year", "Rolling Avg 35 ADU"]
+            "Location_OnOrder", "Position", "Buy Qty", "15MP Avail",
+            "Volume", "PY Volume", "Volume_Prior Year", "Rolling Avg 35 ADU"]
 
     vend_sum = (buys.groupby(["Region", "Primary Vendor", "Vendor Type"], dropna=False)
                 .agg(SKU_Locations=("ItemNo", "size"),
@@ -350,11 +360,12 @@ def write_excel(df, buys, warns, out_path):
 def write_html(buys, warns, run_date, out_path):
     import json
 
-    rows = buys[["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
-                 "Final Velocity", "Primary Vendor", "Vendor Type",
-                 "Demand ADU", "Target Days", "Target Qty", "Position",
-                 "Buy Qty", "Region"]].values.tolist()
-    payload = json.dumps(rows, default=str)
+    tbl = buys[["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
+                "Final Velocity", "Primary Vendor", "Vendor Type",
+                "Demand ADU", "Target Days", "Target Qty", "Position",
+                "Buy Qty", "Region"]].copy()
+    tbl["15MP Avail"] = buys["15MP Avail"].fillna(-1).astype(int)  # -1 = n/a
+    payload = json.dumps(tbl.values.tolist(), default=str)
 
     warn_html = "".join(f'<div class="warn">&#9888;&#65039; {w}</div>' for w in warns)
 
@@ -406,6 +417,7 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 .bseg{height:16px;min-width:1px}
 .bseg.end{border-radius:0 4px 4px 0}
 #tip{position:fixed;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;pointer-events:none;display:none;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+.ok{color:#0ca30c;font-weight:700}
 </style></head><body>
 <h1>KSI Replenishment Buy List</h1>
 <div class="sub">Generated __DATE__ &middot; demand = recency-weighted ADU (where available) &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
@@ -442,6 +454,7 @@ __WARNS__
 <th data-k="5">Vendor</th><th data-k="6">Type</th><th data-k="7" class="num">Demand/day</th>
 <th data-k="8" class="num">Target days</th><th data-k="9" class="num">Target</th>
 <th data-k="10" class="num">Position</th><th data-k="11" class="num">Buy</th>
+<th data-k="13" class="num" title="15MP onhand + intransit for this SKU (Northeast only). &#10003; = covers this row's buy qty - consider transferring instead of buying.">15MP avail</th>
 </tr></thead><tbody></tbody></table>
 <div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
 </div>
@@ -475,7 +488,8 @@ view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:Str
 page=0;render()}
 function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
 view.slice(page*PS,(page+1)*PS).forEach(r=>{const tr=document.createElement('tr');
-tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td>${r[3]}</td><td>${r[4]||''}</td><td>${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td>`;
+const av=r[13]<0?'':r[13].toLocaleString()+(r[13]>=r[11]?' <span class="ok">&#10003;</span>':'');
+tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td>${r[3]}</td><td>${r[4]||''}</td><td>${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td><td class="num">${av}</td>`;
 tb.appendChild(tr)});
 $('count').textContent=view.length.toLocaleString()+' rows';
 $('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))}`}
@@ -484,9 +498,9 @@ $('prev').onclick=()=>{if(page>0){page--;render()}};
 $('next').onclick=()=>{if((page+1)*PS<view.length){page++;render()}};
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
 $('csv').onclick=()=>{
-const hdr=['Region','Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty'];
+const hdr=['Region','Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty','15MP Avail','15MP Covers Buy'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
-const csv=[hdr.join(',')].concat(view.map(r=>[r[12],...r.slice(0,12)].map(esc).join(','))).join('\r\n');
+const csv=[hdr.join(',')].concat(view.map(r=>[r[12],...r.slice(0,12),r[13]<0?'':r[13],r[13]<0?'':(r[13]>=r[11]?'Y':'N')].map(esc).join(','))).join('\r\n');
 const a=document.createElement('a');
 a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
 const reg=(REGION||'all-regions').toLowerCase().replace(/\s+/g,'-');
