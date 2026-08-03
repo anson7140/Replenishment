@@ -249,7 +249,17 @@ def write_html(buys, warns, run_date, out_path):
     vend_sum = (buys.groupby(["Primary Vendor", "Vendor Type"], dropna=False)
                 ["Buy Qty"].sum().reset_index()
                 .sort_values("Buy Qty", ascending=False))
-    wh_sum = buys.groupby("Warehouse")["Buy Qty"].sum().reset_index()
+    vdata = [[r["Primary Vendor"] or "(none)", r["Vendor Type"] or "",
+              int(r["Buy Qty"])] for _, r in vend_sum.iterrows()]
+
+    wh_type = (buys.assign(t=buys["Vendor Type"].where(
+                   buys["Vendor Type"].isin(["Oversea", "Domestic"]), "Unassigned"))
+               .pivot_table(index="Warehouse", columns="t", values="Buy Qty",
+                            aggfunc="sum", fill_value=0))
+    wdata = sorted(
+        ([wh, int(row.get("Oversea", 0)), int(row.get("Domestic", 0)),
+          int(row.get("Unassigned", 0))] for wh, row in wh_type.iterrows()),
+        key=lambda r: -(r[1] + r[2] + r[3]))
 
     rows = buys[["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
                  "Final Velocity", "Primary Vendor", "Vendor Type",
@@ -263,22 +273,15 @@ def write_html(buys, warns, run_date, out_path):
         "oversea": f"{int(buys.loc[buys['Vendor Type']=='Oversea','Buy Qty'].sum()):,}",
         "domestic": f"{int(buys.loc[buys['Vendor Type']=='Domestic','Buy Qty'].sum()):,}",
     }
-    vend_rows = "".join(
-        f"<tr><td>{r['Primary Vendor'] or '(none)'}</td><td>{r['Vendor Type'] or '-'}</td>"
-        f"<td class='num'>{int(r['Buy Qty']):,}</td></tr>"
-        for _, r in vend_sum.head(25).iterrows())
-    wh_rows = "".join(
-        f"<tr><td>{r['Warehouse']}</td><td class='num'>{int(r['Buy Qty']):,}</td></tr>"
-        for _, r in wh_sum.sort_values('Buy Qty', ascending=False).iterrows())
-
     warn_html = "".join(f'<div class="warn">&#9888;&#65039; {w}</div>' for w in warns)
 
     html = HTML_TEMPLATE
     for k, v in {"__DATE__": run_date, "__WARNS__": warn_html,
                  "__SKULOC__": stats["skuLoc"],
                  "__UNITS__": stats["units"], "__OVERSEA__": stats["oversea"],
-                 "__DOMESTIC__": stats["domestic"], "__VENDROWS__": vend_rows,
-                 "__WHROWS__": wh_rows, "__DATA__": payload}.items():
+                 "__DOMESTIC__": stats["domestic"],
+                 "__VDATA__": json.dumps(vdata), "__WDATA__": json.dumps(wdata),
+                 "__DATA__": payload}.items():
         html = html.replace(k, v)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
@@ -289,8 +292,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KSI Buy List - __DATE__</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78}
-@media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8}}
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78;--s1:#2a78d6;--s2:#eb6834;--sx:#898781}
+@media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8;--s1:#3987e5;--s2:#d95926}}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink);padding:24px}
 h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:20px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
@@ -310,6 +313,21 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--acc);color:#fff}
 .warn{background:#fff3cd;border:1px solid #ffe08a;color:#664d03;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 @media (prefers-color-scheme: dark){.warn{background:#3a3020;border-color:#6b5a2a;color:#ffd97a}}
+.ctrlbar{display:flex;gap:16px;align-items:center;margin:0 0 12px;flex-wrap:wrap}
+.lg{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}
+.sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+.seg{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:6px 12px;font-size:12px}
+.seg button.on{background:var(--acc);color:#fff}
+.crow{display:grid;grid-template-columns:118px 1fr 76px;align-items:center;gap:8px;min-height:24px}
+.crow .nm{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .val{font-size:12px;color:var(--ink);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ghead{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:12px 0 4px;display:flex;justify-content:space-between}
+.ghead:first-child{margin-top:2px}
+.track{display:flex;gap:2px;height:16px}
+.bseg{height:16px;min-width:1px}
+.bseg.end{border-radius:0 4px 4px 0}
+#tip{position:fixed;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;pointer-events:none;display:none;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 </style></head><body>
 <h1>KSI Replenishment Buy List</h1>
 <div class="sub">Generated __DATE__ &middot; demand = YTD ADU &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
@@ -320,10 +338,17 @@ __WARNS__
 <div class="card"><div class="v">__OVERSEA__</div><div class="l">Oversea vendor units</div></div>
 <div class="card"><div class="v">__DOMESTIC__</div><div class="l">Domestic vendor units</div></div>
 </div>
-<div class="grid2">
-<div class="panel"><h2>Top vendors by buy units</h2><table><thead><tr><th>Vendor</th><th>Type</th><th class="num">Buy units</th></tr></thead><tbody>__VENDROWS__</tbody></table></div>
-<div class="panel"><h2>Buy units by warehouse</h2><table><thead><tr><th>Warehouse</th><th class="num">Buy units</th></tr></thead><tbody>__WHROWS__</tbody></table></div>
+<div class="ctrlbar">
+<span class="lg"><i class="sw" style="background:var(--s1)"></i>Oversea</span>
+<span class="lg"><i class="sw" style="background:var(--s2)"></i>Domestic</span>
+<span class="lg" id="lgUn" hidden><i class="sw" style="background:var(--sx)"></i>Unassigned vendor</span>
+<span class="seg"><button id="mUnits" class="on">Units</button><button id="mCtn">Containers (1,300/ctn)</button></span>
 </div>
+<div class="grid2">
+<div class="panel"><h2 id="vh">Top vendors</h2><div id="vchart"></div></div>
+<div class="panel"><h2 id="whh">By warehouse</h2><div id="wchart"></div></div>
+</div>
+<div id="tip"></div>
 <div class="panel">
 <h2>Buy list detail <span class="badge" id="count"></span></h2>
 <div class="controls">
@@ -368,6 +393,49 @@ a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8
 a.download='buy_list_'+document.title.split(' - ')[1]+'_'+(view.length===DATA.length?'all':'filtered')+'.csv';
 a.click();URL.revokeObjectURL(a.href)};
 apply();
+
+// ---- charts: top vendors & by warehouse, units <-> containers toggle ----
+const VDATA=__VDATA__,WDATA=__WDATA__,CTN=1300;let mode='units';
+const COLORS={Oversea:'var(--s1)',Domestic:'var(--s2)',Unassigned:'var(--sx)'};
+const fmtC=v=>{const c=v/CTN;return c>0&&c<0.05?'<0.1':c.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1})};
+const fmt=v=>mode==='units'?v.toLocaleString():fmtC(v);
+const both=v=>v.toLocaleString()+' units · '+fmtC(v)+' ctn';
+const tip=$('tip');
+function tipMove(e){tip.style.left=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-8)+'px';tip.style.top=Math.min(e.clientY+14,innerHeight-tip.offsetHeight-8)+'px'}
+function hoverize(el,html){el.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.display='block';tipMove(e)});el.addEventListener('mouseleave',()=>tip.style.display='none')}
+function renderVend(){
+const el=$('vchart');el.innerHTML='';
+const max=Math.max(...VDATA.map(r=>r[2]));
+for(const g of ['Oversea','Domestic','Unassigned']){
+const rows=VDATA.filter(r=>(r[1]||'Unassigned')===g);
+if(!rows.length)continue;
+const tot=rows.reduce((s,r)=>s+r[2],0);
+const top=rows.slice(0,8),rest=rows.slice(8),restSum=rest.reduce((s,r)=>s+r[2],0);
+const h=document.createElement('div');h.className='ghead';h.innerHTML=`<span>${g}</span><span>${fmt(tot)}</span>`;el.appendChild(h);
+const items=top.map(r=>[r[0],r[2],false]);if(restSum)items.push([`Other (${rest.length} vendors)`,restSum,true]);
+for(const [nm,v] of items){
+const row=document.createElement('div');row.className='crow';
+row.innerHTML=`<span class="nm" title="${nm}">${nm}</span><span class="track"><span class="bseg end" style="width:${Math.max(100*v/max,.4).toFixed(2)}%;background:${COLORS[g]}"></span></span><span class="val">${fmt(v)}</span>`;
+hoverize(row.querySelector('.bseg'),`<b>${nm}</b><br>${g}<br>${both(v)}`);
+el.appendChild(row);}}}
+function renderWh(){
+const el=$('wchart');el.innerHTML='';
+const max=Math.max(...WDATA.map(r=>r[1]+r[2]+r[3]));
+for(const [wh,os,dom,un] of WDATA){
+const tot=os+dom+un;
+const segs=[['Oversea',os],['Domestic',dom],['Unassigned',un]].filter(s=>s[1]>0);
+const row=document.createElement('div');row.className='crow';
+row.innerHTML=`<span class="nm">${wh}</span><span class="track">${segs.map((s,i)=>`<span class="bseg${i===segs.length-1?' end':''}" style="width:${(100*s[1]/max).toFixed(2)}%;background:${COLORS[s[0]]}"></span>`).join('')}</span><span class="val">${fmt(tot)}</span>`;
+row.querySelectorAll('.bseg').forEach((sg,i)=>hoverize(sg,`<b>${wh}</b><br>${segs[i][0]}: ${both(segs[i][1])}<br>Total: ${both(tot)}`));
+el.appendChild(row);}}
+function renderCharts(){renderVend();renderWh();
+$('vh').textContent='Top vendors — '+(mode==='units'?'buy units':'containers (1,300 units each)');
+$('whh').textContent=(mode==='units'?'Buy units':'Containers')+' by warehouse';
+$('mUnits').classList.toggle('on',mode==='units');$('mCtn').classList.toggle('on',mode!=='units')}
+$('mUnits').onclick=()=>{mode='units';renderCharts()};
+$('mCtn').onclick=()=>{mode='ctn';renderCharts()};
+if(VDATA.some(r=>!r[1]))$('lgUn').hidden=false;
+renderCharts();
 </script></body></html>
 """
 

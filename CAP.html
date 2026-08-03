@@ -3,8 +3,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KSI Buy List - 2026-08-03</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78}
-@media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8}}
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78;--s1:#2a78d6;--s2:#eb6834;--sx:#898781}
+@media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8;--s1:#3987e5;--s2:#d95926}}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink);padding:24px}
 h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:20px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
@@ -24,6 +24,21 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--acc);color:#fff}
 .warn{background:#fff3cd;border:1px solid #ffe08a;color:#664d03;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 @media (prefers-color-scheme: dark){.warn{background:#3a3020;border-color:#6b5a2a;color:#ffd97a}}
+.ctrlbar{display:flex;gap:16px;align-items:center;margin:0 0 12px;flex-wrap:wrap}
+.lg{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}
+.sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+.seg{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;border-radius:0;padding:6px 12px;font-size:12px}
+.seg button.on{background:var(--acc);color:#fff}
+.crow{display:grid;grid-template-columns:118px 1fr 76px;align-items:center;gap:8px;min-height:24px}
+.crow .nm{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .val{font-size:12px;color:var(--ink);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ghead{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:12px 0 4px;display:flex;justify-content:space-between}
+.ghead:first-child{margin-top:2px}
+.track{display:flex;gap:2px;height:16px}
+.bseg{height:16px;min-width:1px}
+.bseg.end{border-radius:0 4px 4px 0}
+#tip{position:fixed;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;pointer-events:none;display:none;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 </style></head><body>
 <h1>KSI Replenishment Buy List</h1>
 <div class="sub">Generated 2026-08-03 &middot; demand = YTD ADU &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
@@ -34,10 +49,17 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 <div class="card"><div class="v">86,283</div><div class="l">Oversea vendor units</div></div>
 <div class="card"><div class="v">5,050</div><div class="l">Domestic vendor units</div></div>
 </div>
-<div class="grid2">
-<div class="panel"><h2>Top vendors by buy units</h2><table><thead><tr><th>Vendor</th><th>Type</th><th class="num">Buy units</th></tr></thead><tbody><tr><td>TONG</td><td>Oversea</td><td class='num'>19,064</td></tr><tr><td>JINSHIUAN</td><td>Oversea</td><td class='num'>9,967</td></tr><tr><td>COBR</td><td>Oversea</td><td class='num'>7,865</td></tr><tr><td>FORTRESS</td><td>Oversea</td><td class='num'>7,735</td></tr><tr><td>YIH</td><td>Oversea</td><td class='num'>5,763</td></tr><tr><td>GOLB</td><td>Oversea</td><td class='num'>4,775</td></tr><tr><td>YCC</td><td>Oversea</td><td class='num'>4,434</td></tr><tr><td>JLAI</td><td>Oversea</td><td class='num'>3,821</td></tr><tr><td>ANTRC</td><td>Oversea</td><td class='num'>3,532</td></tr><tr><td>AUTOPO</td><td>Oversea</td><td class='num'>2,897</td></tr><tr><td>MAXZ</td><td>Domestic</td><td class='num'>2,820</td></tr><tr><td>EAGLE</td><td>Oversea</td><td class='num'>2,601</td></tr><tr><td>API</td><td>Oversea</td><td class='num'>2,273</td></tr><tr><td>GOODGO</td><td>Oversea</td><td class='num'>2,216</td></tr><tr><td>GBC</td><td>Oversea</td><td class='num'>2,043</td></tr><tr><td>GORD</td><td>Oversea</td><td class='num'>1,930</td></tr><tr><td>CHL</td><td>Oversea</td><td class='num'>1,629</td></tr><tr><td>REFL</td><td>Domestic</td><td class='num'>1,148</td></tr><tr><td>PROF</td><td>Oversea</td><td class='num'>705</td></tr><tr><td>GENE</td><td>Domestic</td><td class='num'>703</td></tr><tr><td>DJ</td><td>Oversea</td><td class='num'>675</td></tr><tr><td>SATAIH</td><td>Oversea</td><td class='num'>592</td></tr><tr><td>GIVING</td><td>Oversea</td><td class='num'>592</td></tr><tr><td>POLYWAY</td><td>Oversea</td><td class='num'>322</td></tr><tr><td>KONG</td><td>Oversea</td><td class='num'>307</td></tr></tbody></table></div>
-<div class="panel"><h2>Buy units by warehouse</h2><table><thead><tr><th>Warehouse</th><th class="num">Buy units</th></tr></thead><tbody><tr><td>01NJ</td><td class='num'>20,289</td></tr><tr><td>09SJ</td><td class='num'>17,167</td></tr><tr><td>13PA</td><td class='num'>14,632</td></tr><tr><td>07BK</td><td class='num'>13,814</td></tr><tr><td>03LF</td><td class='num'>13,289</td></tr><tr><td>05RO</td><td class='num'>11,136</td></tr><tr><td>15MP</td><td class='num'>1,071</td></tr></tbody></table></div>
+<div class="ctrlbar">
+<span class="lg"><i class="sw" style="background:var(--s1)"></i>Oversea</span>
+<span class="lg"><i class="sw" style="background:var(--s2)"></i>Domestic</span>
+<span class="lg" id="lgUn" hidden><i class="sw" style="background:var(--sx)"></i>Unassigned vendor</span>
+<span class="seg"><button id="mUnits" class="on">Units</button><button id="mCtn">Containers (1,300/ctn)</button></span>
 </div>
+<div class="grid2">
+<div class="panel"><h2 id="vh">Top vendors</h2><div id="vchart"></div></div>
+<div class="panel"><h2 id="whh">By warehouse</h2><div id="wchart"></div></div>
+</div>
+<div id="tip"></div>
 <div class="panel">
 <h2>Buy list detail <span class="badge" id="count"></span></h2>
 <div class="controls">
@@ -82,4 +104,47 @@ a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8
 a.download='buy_list_'+document.title.split(' - ')[1]+'_'+(view.length===DATA.length?'all':'filtered')+'.csv';
 a.click();URL.revokeObjectURL(a.href)};
 apply();
+
+// ---- charts: top vendors & by warehouse, units <-> containers toggle ----
+const VDATA=[["TONG", "Oversea", 19064], ["JINSHIUAN", "Oversea", 9967], ["COBR", "Oversea", 7865], ["FORTRESS", "Oversea", 7735], ["YIH", "Oversea", 5763], ["GOLB", "Oversea", 4775], ["YCC", "Oversea", 4434], ["JLAI", "Oversea", 3821], ["ANTRC", "Oversea", 3532], ["AUTOPO", "Oversea", 2897], ["MAXZ", "Domestic", 2820], ["EAGLE", "Oversea", 2601], ["API", "Oversea", 2273], ["GOODGO", "Oversea", 2216], ["GBC", "Oversea", 2043], ["GORD", "Oversea", 1930], ["CHL", "Oversea", 1629], ["REFL", "Domestic", 1148], ["PROF", "Oversea", 705], ["GENE", "Domestic", 703], ["DJ", "Oversea", 675], ["SATAIH", "Oversea", 592], ["GIVING", "Oversea", 592], ["POLYWAY", "Oversea", 322], ["KONG", "Oversea", 307], ["TYG", "Domestic", 244], ["STARSHARP", "Oversea", 200], ["MANZAI", "Oversea", 145], ["YUANDA", "Oversea", 103], ["SHANGHAI", "Oversea", 94], ["(none)", "", 65], ["EZAUTO", "Domestic", 42], ["REGION", "Domestic", 36], ["PACIFIC-1", "Domestic", 25], ["REACH-1", "Domestic", 16], ["MICR", "Domestic", 13], ["DYELIH", "Oversea", 3], ["CSF", "Domestic", 3]],WDATA=[["01NJ", 19347, 931, 11], ["09SJ", 16327, 823, 17], ["13PA", 13679, 945, 8], ["07BK", 12932, 877, 5], ["03LF", 12566, 712, 11], ["05RO", 10505, 623, 8], ["15MP", 927, 139, 5]],CTN=1300;let mode='units';
+const COLORS={Oversea:'var(--s1)',Domestic:'var(--s2)',Unassigned:'var(--sx)'};
+const fmtC=v=>{const c=v/CTN;return c>0&&c<0.05?'<0.1':c.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1})};
+const fmt=v=>mode==='units'?v.toLocaleString():fmtC(v);
+const both=v=>v.toLocaleString()+' units · '+fmtC(v)+' ctn';
+const tip=$('tip');
+function tipMove(e){tip.style.left=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-8)+'px';tip.style.top=Math.min(e.clientY+14,innerHeight-tip.offsetHeight-8)+'px'}
+function hoverize(el,html){el.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.display='block';tipMove(e)});el.addEventListener('mouseleave',()=>tip.style.display='none')}
+function renderVend(){
+const el=$('vchart');el.innerHTML='';
+const max=Math.max(...VDATA.map(r=>r[2]));
+for(const g of ['Oversea','Domestic','Unassigned']){
+const rows=VDATA.filter(r=>(r[1]||'Unassigned')===g);
+if(!rows.length)continue;
+const tot=rows.reduce((s,r)=>s+r[2],0);
+const top=rows.slice(0,8),rest=rows.slice(8),restSum=rest.reduce((s,r)=>s+r[2],0);
+const h=document.createElement('div');h.className='ghead';h.innerHTML=`<span>${g}</span><span>${fmt(tot)}</span>`;el.appendChild(h);
+const items=top.map(r=>[r[0],r[2],false]);if(restSum)items.push([`Other (${rest.length} vendors)`,restSum,true]);
+for(const [nm,v] of items){
+const row=document.createElement('div');row.className='crow';
+row.innerHTML=`<span class="nm" title="${nm}">${nm}</span><span class="track"><span class="bseg end" style="width:${Math.max(100*v/max,.4).toFixed(2)}%;background:${COLORS[g]}"></span></span><span class="val">${fmt(v)}</span>`;
+hoverize(row.querySelector('.bseg'),`<b>${nm}</b><br>${g}<br>${both(v)}`);
+el.appendChild(row);}}}
+function renderWh(){
+const el=$('wchart');el.innerHTML='';
+const max=Math.max(...WDATA.map(r=>r[1]+r[2]+r[3]));
+for(const [wh,os,dom,un] of WDATA){
+const tot=os+dom+un;
+const segs=[['Oversea',os],['Domestic',dom],['Unassigned',un]].filter(s=>s[1]>0);
+const row=document.createElement('div');row.className='crow';
+row.innerHTML=`<span class="nm">${wh}</span><span class="track">${segs.map((s,i)=>`<span class="bseg${i===segs.length-1?' end':''}" style="width:${(100*s[1]/max).toFixed(2)}%;background:${COLORS[s[0]]}"></span>`).join('')}</span><span class="val">${fmt(tot)}</span>`;
+row.querySelectorAll('.bseg').forEach((sg,i)=>hoverize(sg,`<b>${wh}</b><br>${segs[i][0]}: ${both(segs[i][1])}<br>Total: ${both(tot)}`));
+el.appendChild(row);}}
+function renderCharts(){renderVend();renderWh();
+$('vh').textContent='Top vendors — '+(mode==='units'?'buy units':'containers (1,300 units each)');
+$('whh').textContent=(mode==='units'?'Buy units':'Containers')+' by warehouse';
+$('mUnits').classList.toggle('on',mode==='units');$('mCtn').classList.toggle('on',mode!=='units')}
+$('mUnits').onclick=()=>{mode='units';renderCharts()};
+$('mCtn').onclick=()=>{mode='ctn';renderCharts()};
+if(VDATA.some(r=>!r[1]))$('lgUn').hidden=false;
+renderCharts();
 </script></body></html>
