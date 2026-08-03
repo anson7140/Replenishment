@@ -386,10 +386,16 @@ def main():
 
     xlsx_path = os.path.join(OUT_DIR, f"Buy List {run_date}.xlsx")
     write_excel(df, buys, warns, xlsx_path)
-    write_html(buys, warns, run_date, os.path.join(OUT_DIR, "index.html"))
-    # copy to repo root so GitHub Pages can serve it
+    write_html(buys, warns, run_date, os.path.join(OUT_DIR, "CAP.html"))
+    # copy to repo root so GitHub Pages can serve it; index.html redirects
+    # to CAP.html so the Pages homepage URL keeps working
     import shutil
-    shutil.copyfile(os.path.join(OUT_DIR, "index.html"), os.path.join(HERE, "index.html"))
+    shutil.copyfile(os.path.join(OUT_DIR, "CAP.html"), os.path.join(HERE, "CAP.html"))
+    with open(os.path.join(HERE, "index.html"), "w", encoding="utf-8") as f:
+        f.write('<!DOCTYPE html><html><head><meta charset="utf-8">'
+                '<meta http-equiv="refresh" content="0; url=CAP.html">'
+                '<title>KSI Buy List</title></head>'
+                '<body><a href="CAP.html">Open the CAP buy list</a></body></html>')
 
     print(f"rows after filters: {len(df):,}")
     print(f"buy lines: {len(buys):,}  buy units: {int(buys['Buy Qty'].sum()):,}")

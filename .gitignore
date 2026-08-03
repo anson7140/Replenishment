@@ -5,6 +5,7 @@
 !.gitignore
 !README.md
 !index.html
+!CAP.html
 !build_buy_list.py
 !assertions/
 !assertions/*.py

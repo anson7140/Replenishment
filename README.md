@@ -1,7 +1,7 @@
 # KSI Weekly Replenishment Buy List
 
-Interactive weekly buy list report: **[index.html](index.html)** (open via GitHub
-Pages, or download and open in a browser).
+Interactive weekly buy list report: **[CAP.html](CAP.html)** (open via GitHub
+Pages, or download and open in a browser). `index.html` just redirects there.
 
 ## Weekly refresh
 
@@ -13,7 +13,7 @@ Pages, or download and open in a browser).
    python build_buy_list.py
    ```
 
-3. Outputs: `output/Buy List <date>.xlsx` (local only) and `index.html`
+3. Outputs: `output/Buy List <date>.xlsx` (local only) and `CAP.html`
    (committed here).
 4. Verify: `python assertions/verify_buy_list.py` (16 requirement checks).
 
