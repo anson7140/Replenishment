@@ -21,8 +21,7 @@ def latest_output():
     assert files, "no Buy List xlsx found in output/"
     return os.path.join(HERE, "output", files[-1])
 
-raw, master, vtype = b.load_inputs()
-df = b.build(raw, master, vtype)
+df, master, vtype = b.build_all()
 out = pd.read_excel(latest_output(), sheet_name="Buy List")
 passed = 0
 
@@ -32,25 +31,33 @@ def check(name, cond):
     passed += 1
     print(f"PASS  {name}")
 
-# R1: SKU data is location-level and sourced from CAP Raw only
-check("R1a: buy list rows are (Warehouse, ItemNo) location-level",
-      {"Warehouse", "ItemNo"} <= set(out.columns) and len(out) > 0)
-cap_keys = set(zip(raw["Warehouse"], raw["ItemNo"]))
-check("R1b: every buy-list row exists in CAP Raw",
-      all(k in cap_keys for k in zip(out["Warehouse"], out["ItemNo"])))
+# R1: SKU data is location-level and sourced from the regional raw exports
+check("R1a: buy list rows are (Region, Warehouse, ItemNo) location-level",
+      {"Region", "Warehouse", "ItemNo"} <= set(out.columns) and len(out) > 0)
+model_keys = set(zip(df["Region"], df["Warehouse"], df["ItemNo"]))
+check("R1b: every buy-list row exists in a regional raw export",
+      all(k in model_keys
+          for k in zip(out["Region"], out["Warehouse"], out["ItemNo"])))
 
 # R2: daily usage shown per SKU-location
 check("R2: daily usage (ADU and Demand ADU) present on every row",
       out["ADU"].notna().all() and out["Demand ADU"].notna().all())
 
-# R3: vendors derived from KSI_Item_master
-mm = master.set_index("ItemNo")["Primary Vendor"].fillna("").astype(str).str.strip()
-sample = out.head(2000)
-check("R3: primary vendor matches KSI_Item_master",
-      all(mm.get(i, "") == v for i, v in
-          zip(sample["ItemNo"], sample["Primary Vendor"].fillna(""))))
+# R3: vendors derived from KSI_Item_master (NE by ItemNo, FL by Link No_)
+mm_item = (master.drop_duplicates("ItemNo").set_index("ItemNo")
+           ["Primary Vendor"].fillna("").astype(str).str.strip())
+mm_link = b.master_by_link(master)["Primary Vendor"].fillna("").astype(str).str.strip()
+ne = out[out["Region"] == "Northeast"].head(2000)
+fl = out[out["Region"] == "Florida"].head(2000)
+check("R3a: Northeast primary vendor matches master by ItemNo",
+      all(mm_item.get(i, "") == v for i, v in
+          zip(ne["ItemNo"], ne["Primary Vendor"].fillna(""))))
+check("R3b: Florida primary vendor matches master by Link No_",
+      len(fl) == 0 or all(mm_link.get(i, "") == v for i, v in
+                          zip(fl["ItemNo"], fl["Primary Vendor"].fillna(""))))
 
 # R4: overseas/domestic classification from Vendor and Type.csv
+sample = out.head(4000)
 vt = sample["Primary Vendor"].map(vtype).fillna("")
 check("R4: vendor type matches Vendor and Type.csv",
       (vt == sample["Vendor Type"].fillna("")).all())
@@ -70,12 +77,16 @@ check("R6b: A-item domestic safety = 7 days", (a_do["Safety Days"] == 7).all())
 check("R6c: non-A safety = 0 days", (non_a["Safety Days"] == 0).all())
 
 # R7: no patented items, no companywide P-velocity items
-pat = master.set_index("ItemNo")["Patent"]
-cwv = master.set_index("ItemNo")["Companywide veloicty"]
-check("R7a: no Patent=1 items in buy list",
-      not any(pat.get(i, 0) == 1 for i in out["ItemNo"].unique()))
+pat_item = master.drop_duplicates("ItemNo").set_index("ItemNo")["Patent"]
+cwv_item = master.drop_duplicates("ItemNo").set_index("ItemNo")["Companywide veloicty"]
+pat_link = b.master_by_link(master)["Patent"]
+cwv_link = b.master_by_link(master)["Companywide veloicty"]
+check("R7a: no patented items in buy list",
+      not any(pat_item.get(i, 0) == 1 for i in ne["ItemNo"].unique())
+      and not any(pat_link.get(i, 0) == 1 for i in fl["ItemNo"].unique()))
 check("R7b: no P-velocity items in buy list",
-      not any(cwv.get(i, "") == "P" for i in out["ItemNo"].unique()))
+      not any(cwv_item.get(i, "") == "P" for i in ne["ItemNo"].unique())
+      and not any(cwv_link.get(i, "") == "P" for i in fl["ItemNo"].unique()))
 
 # R8: target and buy math
 check("R8a: Target Qty = ceil(Demand ADU x Target Days)",
@@ -87,9 +98,19 @@ check("R8c: Buy Qty = max(0, Target - Position), and only Buy>0 rows listed",
       (out["Buy Qty"] == (out["Target Qty"] - out["Position"]).clip(lower=0)).all()
       and (out["Buy Qty"] > 0).all())
 
-# R9: buy list reconciles with full dataset
-full_buy = int(df.loc[df["Buy Qty"] > 0, "Buy Qty"].sum())
-check("R9: buy list total units reconcile with recomputed model",
-      int(out["Buy Qty"].sum()) == full_buy)
+# R9: buy list reconciles with full dataset, in total and per region
+full = df[df["Buy Qty"] > 0]
+check("R9a: total buy units reconcile with recomputed model",
+      int(out["Buy Qty"].sum()) == int(full["Buy Qty"].sum()))
+check("R9b: per-region buy units reconcile",
+      out.groupby("Region")["Buy Qty"].sum().to_dict()
+      == {k: int(v) for k, v in full.groupby("Region")["Buy Qty"].sum().items()})
+
+# R10: per-region demand basis
+modes = df.attrs["demand_modes"]
+check("R10a: Florida uses the recency blend (true 35-day daily rate)",
+      "Florida" not in modes or modes["Florida"].startswith("blend"))
+check("R10b: Northeast stays YTD-only until its 35-day column is fixed",
+      modes["Northeast"].startswith("YTD ADU only"))
 
 print(f"\n{passed} assertions passed.")

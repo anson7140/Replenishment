@@ -1,12 +1,13 @@
 """
 KSI Weekly Buy List Builder
 ===========================
-Rerun weekly after dropping the new "CAP Raw.xlsx" into this folder:
+Rerun weekly after dropping the new raw export(s) into this folder:
 
     python build_buy_list.py
 
 Inputs (this folder):
-  - CAP Raw.xlsx        location-level YTD sales/inventory export
+  - CAP Raw.xlsx        Northeast location-level YTD export (required)
+  - FL Raw.xlsx         Florida location-level export (optional)
   - KSI_Item_master.csv item master (patent flag, velocity, vendors)
   - Vendor and Type.csv vendor -> Domestic / Oversea
 
@@ -18,15 +19,15 @@ Outputs (output/ subfolder):
 
 Methodology
 -----------
-Demand (units/selling-day) = YTD ADU x seasonal index.
-  - YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31, 2026), as provided.
+Demand (units/selling-day) = base ADU x seasonal index, per region:
+  - Base ADU: 70% last-35-day ADU + 30% YTD ADU when the region's 35-day
+    column is a true daily rate (auto-detected per region); otherwise YTD
+    ADU alone. Florida's ADU_SO_L35 qualifies; the Northeast export's
+    "Rolling Avg 35 ADU" is avg units per day-with-a-sale and is rejected.
   - Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate),
-    computed from PY Volume (same period LY) and Volume_Prior Year (full LY),
-    capped to [0.6, 1.8]; only applied when full-LY volume >= 6 units.
-  - Recency: if "Rolling Avg 35 ADU" is a true daily rate (auto-detected),
-    the base becomes 70% recent / 30% YTD. The current export's column is
-    average units per day-with-a-sale (75% of values are exactly 1.0), not
-    units/day, so it is auto-rejected and YTD ADU is used alone.
+    from PY Volume and Volume_Prior Year, capped [0.6, 1.8], applied only
+    when full-LY volume >= 6 units. Florida's export carries no LY columns,
+    so its index is 1.0.
 
 Coverage target (selling days):
   - Primary vendor Oversea:  100 days  (+21 safety days if velocity A)
@@ -34,9 +35,12 @@ Coverage target (selling days):
 
 Target inventory = ceil(demand x target days)
 Position         = Onhand + OnDock + InTransit + OnOrder
+                   (Florida reports one combined pipeline qty -> OnOrder)
 Buy qty          = max(0, target - position)
 
-Exclusions: patented items (Patent=1) and P-velocity items from the master.
+Exclusions: patented items and companywide P-velocity items per the master.
+Northeast items join the master on ItemNo; Florida items are partslink-keyed
+and join on the master's "Link No_" (rows with a primary vendor preferred).
 Rows with no primary vendor default to the Domestic target and are flagged.
 """
 
@@ -54,11 +58,12 @@ warnings.filterwarnings("ignore")
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(HERE, "output")
 
-RAW_XLSX = os.path.join(HERE, "CAP Raw.xlsx")
+CAP_XLSX = os.path.join(HERE, "CAP Raw.xlsx")
+FL_XLSX = os.path.join(HERE, "FL Raw.xlsx")
 MASTER_CSV = os.path.join(HERE, "KSI_Item_master.csv")
 VENDOR_CSV = os.path.join(HERE, "Vendor and Type.csv")
 
-WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"]
+CAP_WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"]
 
 SELLING_DAYS_YTD = 149          # Jan 1 - Jul 31 2026 selling days (Volume/ADU in export)
 CAL_DAYS_SAME = 212             # calendar days Jan 1 - Jul 31
@@ -72,68 +77,121 @@ SAFETY_A_DOMESTIC = 7           # +1 week for A items, domestic primary
 SEASONAL_CAP = (0.6, 1.8)
 SEASONAL_MIN_LY_UNITS = 6       # need >=6 units full LY to trust a seasonal index
 
-# Recency blend, used only when the export's 35-day column is a true daily
-# rate (units sold last 35 days / 35). The current export's "Rolling Avg 35
-# ADU" is avg units per day-with-a-sale (median 1.0), which fails detection.
+# Recency blend, used per region only when that export's 35-day column is a
+# true daily rate (units sold last 35 days / 35). The Northeast "Rolling Avg
+# 35 ADU" is avg units per day-with-a-sale (median 1.0) and fails detection.
 RECENT_WEIGHT = 0.7             # 70% last-35-day ADU, 30% YTD ADU
 RECENT_VALID_MEDIAN = 0.5       # median of positive values must be below this
 
+# Normalized schema every regional loader must produce.
+SCHEMA = ["Region", "Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
+          "Model", "Final Velocity", "Primary Vendor", "Secondary Vendor",
+          "Volume", "PY Volume", "Volume_Prior Year", "ADU",
+          "Rolling Avg 35 ADU", "Revenue", "Location_Onhand",
+          "Location_OnOnDock", "Location_InTransit", "Location_OnOrder"]
 
-def load_inputs():
-    raw = pd.read_excel(RAW_XLSX)
-    raw = raw[raw["Warehouse"].isin(WAREHOUSES)].copy()
-    raw["ItemNo"] = raw["ItemNo"].astype(str).str.strip()
 
+def load_master_vendor():
     master = pd.read_csv(MASTER_CSV, encoding="utf-8-sig")
     master["ItemNo"] = master["ItemNo"].astype(str).str.strip()
-    master = master.drop_duplicates("ItemNo")
 
     vend = pd.read_csv(VENDOR_CSV, encoding="utf-8-sig")
     vend["V1"] = vend["V1"].astype(str).str.strip()
     vtype = dict(zip(vend["V1"], vend["V1Type"]))
-    return raw, master, vtype
+    return master, vtype
 
 
-def build(raw, master, vtype):
+def _apply_exclusions(df):
+    df = df[df["Patent"].fillna(0) != 1]
+    df = df[df["Companywide veloicty"].fillna("") != "P"]
+    return df
+
+
+def load_northeast(master):
+    raw = pd.read_excel(CAP_XLSX)
+    raw = raw[raw["Warehouse"].isin(CAP_WAREHOUSES)].copy()
+    raw["ItemNo"] = raw["ItemNo"].astype(str).str.strip()
+
     df = raw.merge(
-        master[["ItemNo", "Patent", "Companywide veloicty",
-                "Primary Vendor", "Secondary Vendor"]],
+        master.drop_duplicates("ItemNo")
+        [["ItemNo", "Patent", "Companywide veloicty",
+          "Primary Vendor", "Secondary Vendor"]],
         on="ItemNo", how="left",
     )
+    df = _apply_exclusions(df)
+    df["Region"] = "Northeast"
+    for c in ["Volume", "PY Volume", "Volume_Prior Year", "ADU",
+              "Rolling Avg 35 ADU", "Revenue", "Location_Onhand",
+              "Location_OnOnDock", "Location_InTransit", "Location_OnOrder"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    return df[SCHEMA]
 
-    # --- exclusions ---------------------------------------------------------
-    df = df[(df["Patent"].fillna(0) != 1)]
-    df = df[df["Companywide veloicty"].fillna("") != "P"]
 
-    # --- vendor type --------------------------------------------------------
+def master_by_link(master):
+    """Master keyed by partslink (Link No_); rows with a vendor win ties."""
+    m = master.copy()
+    m["_link"] = m["Link No_"].astype(str).str.strip()
+    m["_has_v"] = m["Primary Vendor"].notna()
+    m = (m.sort_values("_has_v", ascending=False)
+         .drop_duplicates("_link"))
+    return m.set_index("_link")[["Patent", "Companywide veloicty",
+                                 "Primary Vendor", "Secondary Vendor"]]
+
+
+def load_florida(master):
+    raw = pd.read_excel(FL_XLSX, sheet_name="Export")
+    df = pd.DataFrame({
+        "Warehouse": raw["Location[DC]"].astype(str).str.strip(),
+        "ItemNo": raw["Item[ItemNum]"].astype(str).str.strip(),
+        "Product Desc": raw["[Part_Desc]"].fillna(""),
+        "Final Velocity": raw["[Pod_velocity]"].fillna(""),
+        "Volume": pd.to_numeric(raw["[Volume]"], errors="coerce").fillna(0),
+        "ADU": pd.to_numeric(raw["[ADU]"], errors="coerce").fillna(0),
+        "Rolling Avg 35 ADU": pd.to_numeric(raw["[ADU_SO_L35]"], errors="coerce").fillna(0),
+        "Revenue": pd.to_numeric(raw["[Revenue]"], errors="coerce").fillna(0),
+        "Location_Onhand": pd.to_numeric(raw["[Location_Onhand]"], errors="coerce").fillna(0),
+        "Location_OnOrder": pd.to_numeric(raw["[Qty_InPipeLine]"], errors="coerce").fillna(0),
+        "_patented": raw["Item[Patented]"].fillna(False),
+    })
+    df["Region"] = "Florida"
+    df["CAP_ItemNum"] = ""
+    df["Model"] = ""
+    df["PY Volume"] = 0.0
+    df["Volume_Prior Year"] = 0.0
+    df["Location_OnOnDock"] = 0.0
+    df["Location_InTransit"] = 0.0
+
+    mlink = master_by_link(master)
+    df = df.join(mlink, on="ItemNo")
+    df = df[~df["_patented"]]
+    df = _apply_exclusions(df)
+    return df[SCHEMA]
+
+
+def compute(df, vtype):
+    """Shared model: vendor typing, per-region demand, targets, buys."""
+    df = df.copy()
     df["Primary Vendor"] = df["Primary Vendor"].fillna("").astype(str).str.strip()
     df["Secondary Vendor"] = df["Secondary Vendor"].fillna("").astype(str).str.strip()
     df["Vendor Type"] = df["Primary Vendor"].map(vtype).fillna("")
     df["Vendor Missing"] = df["Primary Vendor"] == ""
 
-    # --- demand -------------------------------------------------------------
-    for c in ["Volume", "PY Volume", "Volume_Prior Year", "ADU", "PY ADU",
-              "Location_Onhand", "Location_OnOnDock", "Location_InTransit",
-              "Location_OnOrder", "Rolling Avg 35 ADU", "Revenue"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-
     df["ADU"] = df["ADU"].clip(lower=0)
 
-    # Recency detection: a real 35-day ADU has mostly-fractional values like
-    # YTD ADU. The broken per-active-day column has a positive-value median
-    # of 1.0 and gets rejected here.
-    r35 = df["Rolling Avg 35 ADU"].clip(lower=0)
-    pos = r35[r35 > 0]
-    recent_valid = len(pos) > 0 and pos.median() < RECENT_VALID_MEDIAN
-    if recent_valid:
-        base_adu = RECENT_WEIGHT * r35 + (1 - RECENT_WEIGHT) * df["ADU"]
-        demand_mode = (f"blend of {RECENT_WEIGHT:.0%} last-35-day ADU + "
-                       f"{1 - RECENT_WEIGHT:.0%} YTD ADU")
-    else:
-        base_adu = df["ADU"]
-        demand_mode = ("YTD ADU only ('Rolling Avg 35 ADU' column is not a "
-                       "daily rate in this export)")
-    df.attrs["demand_mode"] = demand_mode
+    # --- per-region base demand (recency auto-detection) --------------------
+    df["_base"] = df["ADU"]
+    modes = {}
+    for reg, g in df.groupby("Region"):
+        r35 = g["Rolling Avg 35 ADU"].clip(lower=0)
+        pos = r35[r35 > 0]
+        if len(pos) > 0 and pos.median() < RECENT_VALID_MEDIAN:
+            df.loc[g.index, "_base"] = (RECENT_WEIGHT * r35
+                                        + (1 - RECENT_WEIGHT) * g["ADU"])
+            modes[reg] = (f"blend of {RECENT_WEIGHT:.0%} last-35-day ADU + "
+                          f"{1 - RECENT_WEIGHT:.0%} YTD ADU")
+        else:
+            modes[reg] = ("YTD ADU only (35-day column is not a daily rate "
+                          "in this export)")
 
     ly_same = df["PY Volume"].clip(lower=0)
     ly_full = df["Volume_Prior Year"].clip(lower=0)
@@ -147,7 +205,8 @@ def build(raw, master, vtype):
         1.0,
     )
     df["Seasonal Index"] = np.clip(idx, *SEASONAL_CAP).round(3)
-    df["Demand ADU"] = (base_adu * df["Seasonal Index"]).round(5)
+    df["Demand ADU"] = (df["_base"] * df["Seasonal Index"]).round(5)
+    df = df.drop(columns="_base")
 
     # --- coverage target ----------------------------------------------------
     oversea = df["Vendor Type"] == "Oversea"
@@ -165,24 +224,37 @@ def build(raw, master, vtype):
         + df["Location_InTransit"] + df["Location_OnOrder"]
     ).astype(int)
     df["Buy Qty"] = (df["Target Qty"] - df["Position"]).clip(lower=0).astype(int)
+    df.attrs["demand_modes"] = modes
     return df
+
+
+def build_all():
+    """Load every available regional export and run the shared model."""
+    master, vtype = load_master_vendor()
+    frames = [load_northeast(master)]
+    if os.path.exists(FL_XLSX):
+        frames.append(load_florida(master))
+    df = compute(pd.concat(frames, ignore_index=True), vtype)
+    return df, master, vtype
 
 
 def data_quality_warnings(df):
     warns = []
-    for wh, g in df.groupby("Warehouse"):
+    for (reg, wh), g in df.groupby(["Region", "Warehouse"]):
         if g["Volume"].sum() == 0 and g["Position"].sum() == 0:
             warns.append(
-                f"Warehouse {wh}: all volume and inventory are zero in this export "
-                f"({len(g):,} rows) - likely truncated by the source system "
-                f"('Exported data exceeded the allowed volume'). No buys generated for {wh}; re-export needed."
+                f"[{reg}] Warehouse {wh}: all volume and inventory are zero in "
+                f"this export ({len(g):,} rows) - likely truncated by the source "
+                f"system. No buys generated for {wh}; re-export needed."
             )
-    n_noveil = int((df["Vendor Missing"] & (df["Buy Qty"] > 0)).sum())
-    if n_noveil:
-        warns.append(
-            f"{n_noveil} buy lines have no primary vendor in KSI_Item_master - "
-            f"defaulted to the Domestic 14-day target; see Exceptions sheet."
-        )
+    for reg, g in df.groupby("Region"):
+        n = int((g["Vendor Missing"] & (g["Buy Qty"] > 0)).sum())
+        if n:
+            warns.append(
+                f"[{reg}] {n:,} buy lines have no primary vendor in "
+                f"KSI_Item_master - defaulted to the Domestic 14-day target; "
+                f"see Exceptions sheet."
+            )
     return warns
 
 
@@ -190,33 +262,36 @@ def write_excel(df, buys, warns, out_path):
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    cols = ["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc", "Model",
-            "Final Velocity", "Primary Vendor", "Vendor Type", "Secondary Vendor",
-            "ADU", "Seasonal Index", "Demand ADU", "Lead Days", "Safety Days",
-            "Target Days", "Target Qty", "Location_Onhand", "Location_OnOnDock",
-            "Location_InTransit", "Location_OnOrder", "Position", "Buy Qty",
-            "Volume", "PY Volume", "Volume_Prior Year", "Rolling Avg 35 ADU"]
+    cols = ["Region", "Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
+            "Model", "Final Velocity", "Primary Vendor", "Vendor Type",
+            "Secondary Vendor", "ADU", "Seasonal Index", "Demand ADU",
+            "Lead Days", "Safety Days", "Target Days", "Target Qty",
+            "Location_Onhand", "Location_OnOnDock", "Location_InTransit",
+            "Location_OnOrder", "Position", "Buy Qty", "Volume", "PY Volume",
+            "Volume_Prior Year", "Rolling Avg 35 ADU"]
 
-    vend_sum = (buys.groupby(["Primary Vendor", "Vendor Type"], dropna=False)
+    vend_sum = (buys.groupby(["Region", "Primary Vendor", "Vendor Type"], dropna=False)
                 .agg(SKU_Locations=("ItemNo", "size"),
                      Unique_SKUs=("ItemNo", "nunique"),
                      Buy_Units=("Buy Qty", "sum"))
                 .reset_index().sort_values("Buy_Units", ascending=False))
-    wh_sum = (buys.groupby("Warehouse")
+    wh_sum = (buys.groupby(["Region", "Warehouse"])
               .agg(SKU_Locations=("ItemNo", "size"),
                    Buy_Units=("Buy Qty", "sum"))
               .reset_index().sort_values("Buy_Units", ascending=False))
     exceptions = df[df["Vendor Missing"] & (df["Buy Qty"] > 0)][cols]
 
+    modes = df.attrs.get("demand_modes", {})
     assumptions = pd.DataFrame({"Assumption": [
-        f"Demand basis: {df.attrs.get('demand_mode', 'YTD ADU')}. YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw.",
-        "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units.",
-        "Recency weighting activates automatically once 'Rolling Avg 35 ADU' is exported as a true daily rate (total units last 35 days / 35); the current column (avg units per day-with-sales) is auto-rejected.",
+        *(f"[{r}] Demand basis: {m}." for r, m in modes.items()),
+        "Northeast YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw. Florida ADU as provided in FL Raw (source-computed daily rate).",
+        "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units. FL Raw carries no LY columns, so Florida's index is 1.0.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. A items add 21 safety days (oversea) / 7 (domestic). Days = selling days, same basis as ADU.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
-        "Excluded: patented items (Patent=1) and companywide P-velocity items per KSI_Item_master.",
+        "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
+        "Excluded: patented items and companywide P-velocity items per KSI_Item_master (Florida also honors its export's own Patented flag).",
+        "Northeast items join the master on ItemNo; Florida items are partslink-keyed and join on the master's Link No_ (rows with a primary vendor preferred).",
         "Rows with no primary vendor use the Domestic 14-day target and appear on the Exceptions sheet - assign vendors to fix.",
-        "Source export warning: 'Exported data exceeded the allowed volume. Some data may have been omitted.' appears in CAP Raw - some rows may be missing from the source.",
         "Negative ADU (net returns) treated as zero demand.",
     ] + ["DATA WARNING: " + w for w in warns]})
 
@@ -246,41 +321,16 @@ def write_excel(df, buys, warns, out_path):
 def write_html(buys, warns, run_date, out_path):
     import json
 
-    vend_sum = (buys.groupby(["Primary Vendor", "Vendor Type"], dropna=False)
-                ["Buy Qty"].sum().reset_index()
-                .sort_values("Buy Qty", ascending=False))
-    vdata = [[r["Primary Vendor"] or "(none)", r["Vendor Type"] or "",
-              int(r["Buy Qty"])] for _, r in vend_sum.iterrows()]
-
-    wh_type = (buys.assign(t=buys["Vendor Type"].where(
-                   buys["Vendor Type"].isin(["Oversea", "Domestic"]), "Unassigned"))
-               .pivot_table(index="Warehouse", columns="t", values="Buy Qty",
-                            aggfunc="sum", fill_value=0))
-    wdata = sorted(
-        ([wh, int(row.get("Oversea", 0)), int(row.get("Domestic", 0)),
-          int(row.get("Unassigned", 0))] for wh, row in wh_type.iterrows()),
-        key=lambda r: -(r[1] + r[2] + r[3]))
-
     rows = buys[["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
                  "Final Velocity", "Primary Vendor", "Vendor Type",
                  "Demand ADU", "Target Days", "Target Qty", "Position",
-                 "Buy Qty"]].values.tolist()
+                 "Buy Qty", "Region"]].values.tolist()
     payload = json.dumps(rows, default=str)
 
-    stats = {
-        "skuLoc": f"{len(buys):,}",
-        "units": f"{int(buys['Buy Qty'].sum()):,}",
-        "oversea": f"{int(buys.loc[buys['Vendor Type']=='Oversea','Buy Qty'].sum()):,}",
-        "domestic": f"{int(buys.loc[buys['Vendor Type']=='Domestic','Buy Qty'].sum()):,}",
-    }
     warn_html = "".join(f'<div class="warn">&#9888;&#65039; {w}</div>' for w in warns)
 
     html = HTML_TEMPLATE
     for k, v in {"__DATE__": run_date, "__WARNS__": warn_html,
-                 "__SKULOC__": stats["skuLoc"],
-                 "__UNITS__": stats["units"], "__OVERSEA__": stats["oversea"],
-                 "__DOMESTIC__": stats["domestic"],
-                 "__VDATA__": json.dumps(vdata), "__WDATA__": json.dumps(wdata),
                  "__DATA__": payload}.items():
         html = html.replace(k, v)
     with open(out_path, "w", encoding="utf-8") as f:
@@ -295,7 +345,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 :root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78;--s1:#2a78d6;--s2:#eb6834;--sx:#898781}
 @media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8;--s1:#3987e5;--s2:#d95926}}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink);padding:24px}
-h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:20px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:14px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
 .card .v{font-size:22px;font-weight:700}.card .l{color:var(--mut);font-size:12px}
@@ -316,9 +366,10 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 .ctrlbar{display:flex;gap:16px;align-items:center;margin:0 0 12px;flex-wrap:wrap}
 .lg{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}
 .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
-.seg{margin-left:auto;display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:6px 12px;font-size:12px}
 .seg button.on{background:var(--acc);color:#fff}
+.mlauto{margin-left:auto}
 .crow{display:grid;grid-template-columns:118px 1fr 76px;align-items:center;gap:8px;min-height:24px}
 .crow .nm{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .crow .val{font-size:12px;color:var(--ink);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -330,19 +381,20 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 #tip{position:fixed;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;pointer-events:none;display:none;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 </style></head><body>
 <h1>KSI Replenishment Buy List</h1>
-<div class="sub">Generated __DATE__ &middot; demand = YTD ADU &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
+<div class="sub">Generated __DATE__ &middot; demand = recency-weighted ADU (where available) &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
+<div class="ctrlbar"><span class="seg" id="rseg"></span></div>
 __WARNS__
 <div class="cards">
-<div class="card"><div class="v">__SKULOC__</div><div class="l">SKU-locations to buy</div></div>
-<div class="card"><div class="v">__UNITS__</div><div class="l">Total buy units</div></div>
-<div class="card"><div class="v">__OVERSEA__</div><div class="l">Oversea vendor units</div></div>
-<div class="card"><div class="v">__DOMESTIC__</div><div class="l">Domestic vendor units</div></div>
+<div class="card"><div class="v" id="cSku"></div><div class="l">SKU-locations to buy</div></div>
+<div class="card"><div class="v" id="cUnits"></div><div class="l">Total buy units</div></div>
+<div class="card"><div class="v" id="cOs"></div><div class="l">Oversea vendor units</div></div>
+<div class="card"><div class="v" id="cDom"></div><div class="l">Domestic vendor units</div></div>
 </div>
 <div class="ctrlbar">
 <span class="lg"><i class="sw" style="background:var(--s1)"></i>Oversea</span>
 <span class="lg"><i class="sw" style="background:var(--s2)"></i>Domestic</span>
 <span class="lg" id="lgUn" hidden><i class="sw" style="background:var(--sx)"></i>Unassigned vendor</span>
-<span class="seg"><button id="mUnits" class="on">Units</button><button id="mCtn">Containers (1,300/ctn)</button></span>
+<span class="seg mlauto"><button id="mUnits" class="on">Units</button><button id="mCtn">Containers (1,300/ctn)</button></span>
 </div>
 <div class="grid2">
 <div class="panel"><h2 id="vh">Top vendors</h2><div id="vchart"></div></div>
@@ -355,7 +407,7 @@ __WARNS__
 <input id="q" placeholder="Search SKU / CAP # / description / vendor" size="36">
 <select id="fwh"><option value="">All warehouses</option></select>
 <select id="fvt"><option value="">All vendor types</option><option>Oversea</option><option>Domestic</option></select>
-<select id="fvel"><option value="">All velocities</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
+<select id="fvel"><option value="">All velocities</option></select>
 <button id="csv" title="Downloads the rows matching the current filters">&#11015; Export CSV (filtered)</button>
 </div>
 <table id="tbl"><thead><tr>
@@ -367,11 +419,31 @@ __WARNS__
 <div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
 </div>
 <script>
-const DATA=__DATA__;let view=DATA.slice(),page=0,PS=100,sortK=11,sortD=-1;
+const DATA=__DATA__;let REGION='',view=[],page=0,PS=100,sortK=11,sortD=-1;
 const $=id=>document.getElementById(id);
-[...new Set(DATA.map(r=>r[0]))].sort().forEach(w=>{const o=document.createElement('option');o.textContent=w;$('fwh').appendChild(o)});
+const REGIONS=[...new Set(DATA.map(r=>r[12]))];
+const RDATA=()=>REGION?DATA.filter(r=>r[12]===REGION):DATA;
+
+// region toggle
+const rseg=$('rseg');
+[['','All regions'],...REGIONS.map(r=>[r,r])].forEach(([val,label])=>{
+const b=document.createElement('button');b.textContent=label;b.dataset.r=val;
+b.onclick=()=>{REGION=val;[...rseg.children].forEach(x=>x.classList.toggle('on',x.dataset.r===val));refreshFilters();apply();renderCards();renderCharts()};
+rseg.appendChild(b)});
+rseg.firstChild.classList.add('on');
+if(REGIONS.length<2)rseg.parentElement.style.display='none';
+
+function refreshFilters(){
+const cur=$('fwh').value,rows=RDATA();
+$('fwh').innerHTML='<option value="">All warehouses</option>';
+[...new Set(rows.map(r=>r[0]))].sort().forEach(w=>{const o=document.createElement('option');o.textContent=w;$('fwh').appendChild(o)});
+if([...$('fwh').options].some(o=>o.value===cur))$('fwh').value=cur;
+const curV=$('fvel').value;
+$('fvel').innerHTML='<option value="">All velocities</option>';
+[...new Set(rows.map(r=>r[4]).filter(Boolean))].sort().forEach(v=>{const o=document.createElement('option');o.textContent=v;$('fvel').appendChild(o)});
+if([...$('fvel').options].some(o=>o.value===curV))$('fvel').value=curV;}
 function apply(){const q=$('q').value.toLowerCase(),wh=$('fwh').value,vt=$('fvt').value,vl=$('fvel').value;
-view=DATA.filter(r=>(!wh||r[0]===wh)&&(!vt||r[6]===vt)&&(!vl||r[4]===vl)&&(!q||(r[1]+' '+r[2]+' '+r[3]+' '+r[5]).toLowerCase().includes(q)));
+view=RDATA().filter(r=>(!wh||r[0]===wh)&&(!vt||r[6]===vt)&&(!vl||r[4]===vl)&&(!q||(r[1]+' '+r[2]+' '+r[3]+' '+r[5]).toLowerCase().includes(q)));
 view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
 page=0;render()}
 function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
@@ -385,17 +457,26 @@ $('prev').onclick=()=>{if(page>0){page--;render()}};
 $('next').onclick=()=>{if((page+1)*PS<view.length){page++;render()}};
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
 $('csv').onclick=()=>{
-const hdr=['Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty'];
+const hdr=['Region','Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
-const csv=[hdr.join(',')].concat(view.map(r=>r.map(esc).join(','))).join('\r\n');
+const csv=[hdr.join(',')].concat(view.map(r=>[r[12],...r.slice(0,12)].map(esc).join(','))).join('\r\n');
 const a=document.createElement('a');
 a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
-a.download='buy_list_'+document.title.split(' - ')[1]+'_'+(view.length===DATA.length?'all':'filtered')+'.csv';
+const reg=(REGION||'all-regions').toLowerCase().replace(/\s+/g,'-');
+a.download='buy_list_'+document.title.split(' - ')[1]+'_'+reg+'_'+(view.length===RDATA().length?'all':'filtered')+'.csv';
 a.click();URL.revokeObjectURL(a.href)};
-apply();
+
+// ---- summary cards (region-scoped) ----
+function renderCards(){const rows=RDATA();
+let u=0,os=0,dom=0;
+for(const r of rows){u+=r[11];if(r[6]==='Oversea')os+=r[11];else if(r[6]==='Domestic')dom+=r[11]}
+$('cSku').textContent=rows.length.toLocaleString();
+$('cUnits').textContent=u.toLocaleString();
+$('cOs').textContent=os.toLocaleString();
+$('cDom').textContent=dom.toLocaleString()}
 
 // ---- charts: top vendors & by warehouse, units <-> containers toggle ----
-const VDATA=__VDATA__,WDATA=__WDATA__,CTN=1300;let mode='units';
+const CTN=1300;let mode='units';
 const COLORS={Oversea:'var(--s1)',Domestic:'var(--s2)',Unassigned:'var(--sx)'};
 const fmtC=v=>{const c=v/CTN;return c>0&&c<0.05?'<0.1':c.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1})};
 const fmt=v=>mode==='units'?v.toLocaleString():fmtC(v);
@@ -403,16 +484,25 @@ const both=v=>v.toLocaleString()+' units · '+fmtC(v)+' ctn';
 const tip=$('tip');
 function tipMove(e){tip.style.left=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-8)+'px';tip.style.top=Math.min(e.clientY+14,innerHeight-tip.offsetHeight-8)+'px'}
 function hoverize(el,html){el.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.display='block';tipMove(e)});el.addEventListener('mouseleave',()=>tip.style.display='none')}
+function vendAgg(){const m=new Map();
+for(const r of RDATA()){const k=(r[5]||'(none)')+'|'+(r[6]||'');m.set(k,(m.get(k)||0)+r[11])}
+return[...m.entries()].map(([k,v])=>{const[nm,t]=k.split('|');return[nm,t,v]}).sort((a,b)=>b[2]-a[2])}
+function whAgg(){const m=new Map();
+for(const r of RDATA()){if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
+if(r[6]==='Oversea')a[0]+=r[11];else if(r[6]==='Domestic')a[1]+=r[11];else a[2]+=r[11]}
+return[...m.entries()].map(([w,a])=>[w,...a]).sort((a,b)=>(b[1]+b[2]+b[3])-(a[1]+a[2]+a[3]))}
 function renderVend(){
 const el=$('vchart');el.innerHTML='';
+const VDATA=vendAgg();if(!VDATA.length)return;
 const max=Math.max(...VDATA.map(r=>r[2]));
+$('lgUn').hidden=!VDATA.some(r=>!r[1]);
 for(const g of ['Oversea','Domestic','Unassigned']){
 const rows=VDATA.filter(r=>(r[1]||'Unassigned')===g);
 if(!rows.length)continue;
 const tot=rows.reduce((s,r)=>s+r[2],0);
 const top=rows.slice(0,8),rest=rows.slice(8),restSum=rest.reduce((s,r)=>s+r[2],0);
 const h=document.createElement('div');h.className='ghead';h.innerHTML=`<span>${g}</span><span>${fmt(tot)}</span>`;el.appendChild(h);
-const items=top.map(r=>[r[0],r[2],false]);if(restSum)items.push([`Other (${rest.length} vendors)`,restSum,true]);
+const items=top.map(r=>[r[0],r[2]]);if(restSum)items.push([`Other (${rest.length} vendors)`,restSum]);
 for(const [nm,v] of items){
 const row=document.createElement('div');row.className='crow';
 row.innerHTML=`<span class="nm" title="${nm}">${nm}</span><span class="track"><span class="bseg end" style="width:${Math.max(100*v/max,.4).toFixed(2)}%;background:${COLORS[g]}"></span></span><span class="val">${fmt(v)}</span>`;
@@ -420,6 +510,7 @@ hoverize(row.querySelector('.bseg'),`<b>${nm}</b><br>${g}<br>${both(v)}`);
 el.appendChild(row);}}}
 function renderWh(){
 const el=$('wchart');el.innerHTML='';
+const WDATA=whAgg();if(!WDATA.length)return;
 const max=Math.max(...WDATA.map(r=>r[1]+r[2]+r[3]));
 for(const [wh,os,dom,un] of WDATA){
 const tot=os+dom+un;
@@ -434,8 +525,7 @@ $('whh').textContent=(mode==='units'?'Buy units':'Containers')+' by warehouse';
 $('mUnits').classList.toggle('on',mode==='units');$('mCtn').classList.toggle('on',mode!=='units')}
 $('mUnits').onclick=()=>{mode='units';renderCharts()};
 $('mCtn').onclick=()=>{mode='ctn';renderCharts()};
-if(VDATA.some(r=>!r[1]))$('lgUn').hidden=false;
-renderCharts();
+refreshFilters();apply();renderCards();renderCharts();
 </script></body></html>
 """
 
@@ -444,11 +534,11 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     run_date = date.today().isoformat()
 
-    raw, master, vtype = load_inputs()
-    df = build(raw, master, vtype)
+    df, master, vtype = build_all()
     buys = df[df["Buy Qty"] > 0].sort_values("Buy Qty", ascending=False)
 
-    print(f"demand mode: {df.attrs['demand_mode']}")
+    for reg, mode in df.attrs["demand_modes"].items():
+        print(f"demand mode [{reg}]: {mode}")
     warns = data_quality_warnings(df)
     for w in warns:
         print(f"WARNING: {w}")
@@ -467,10 +557,12 @@ def main():
                 '<body><a href="CAP.html">Open the CAP buy list</a></body></html>')
 
     print(f"rows after filters: {len(df):,}")
-    print(f"buy lines: {len(buys):,}  buy units: {int(buys['Buy Qty'].sum()):,}")
-    print(f"  oversea units: {int(buys.loc[buys['Vendor Type']=='Oversea','Buy Qty'].sum()):,}")
-    print(f"  domestic units: {int(buys.loc[buys['Vendor Type']=='Domestic','Buy Qty'].sum()):,}")
-    print(f"  missing-vendor lines: {int((buys['Vendor Missing']).sum()):,}")
+    for reg, g in buys.groupby("Region"):
+        print(f"[{reg}] buy lines: {len(g):,}  buy units: {int(g['Buy Qty'].sum()):,}"
+              f"  (oversea {int(g.loc[g['Vendor Type']=='Oversea','Buy Qty'].sum()):,}"
+              f" / domestic {int(g.loc[g['Vendor Type']=='Domestic','Buy Qty'].sum()):,}"
+              f" / no-vendor {int(g['Vendor Missing'].sum()):,})")
+    print(f"TOTAL buy lines: {len(buys):,}  buy units: {int(buys['Buy Qty'].sum()):,}")
     print(f"wrote: {xlsx_path}")
     print(f"wrote: {os.path.join(OUT_DIR, 'CAP.html')}")
 
