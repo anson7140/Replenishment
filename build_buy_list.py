@@ -327,7 +327,7 @@ __WARNS__
 <div class="panel">
 <h2>Buy list detail <span class="badge" id="count"></span></h2>
 <div class="controls">
-<input id="q" placeholder="Search SKU / description / vendor" size="34">
+<input id="q" placeholder="Search SKU / CAP # / description / vendor" size="36">
 <select id="fwh"><option value="">All warehouses</option></select>
 <select id="fvt"><option value="">All vendor types</option><option>Oversea</option><option>Domestic</option></select>
 <select id="fvel"><option value="">All velocities</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
