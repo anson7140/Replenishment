@@ -106,11 +106,12 @@ check("R9b: per-region buy units reconcile",
       out.groupby("Region")["Buy Qty"].sum().to_dict()
       == {k: int(v) for k, v in full.groupby("Region")["Buy Qty"].sum().items()})
 
-# R10: per-region demand basis
+# R10: per-region demand basis (both exports carry a true per-selling-day
+# 35-day rate since the 2026-08-03 refresh)
 modes = df.attrs["demand_modes"]
 check("R10a: Florida uses the recency blend (true 35-day daily rate)",
       "Florida" not in modes or modes["Florida"].startswith("blend"))
-check("R10b: Northeast stays YTD-only until its 35-day column is fixed",
-      modes["Northeast"].startswith("YTD ADU only"))
+check("R10b: Northeast uses the recency blend (fixed 35-day column)",
+      modes["Northeast"].startswith("blend"))
 
 print(f"\n{passed} assertions passed.")

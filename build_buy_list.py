@@ -21,9 +21,10 @@ Methodology
 -----------
 Demand (units/selling-day) = base ADU x seasonal index, per region:
   - Base ADU: 70% last-35-day ADU + 30% YTD ADU when the region's 35-day
-    column is a true daily rate (auto-detected per region); otherwise YTD
-    ADU alone. Florida's ADU_SO_L35 qualifies; the Northeast export's
-    "Rolling Avg 35 ADU" is avg units per day-with-a-sale and is rejected.
+    column is a true per-selling-day rate (auto-detected per region);
+    otherwise YTD ADU alone. Both exports qualify since the 2026-08-03
+    refresh (units in last 35 days / ~24 selling days, matching the
+    Volume/149-selling-days basis of YTD ADU).
   - Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate),
     from PY Volume and Volume_Prior Year, capped [0.6, 1.8], applied only
     when full-LY volume >= 6 units. Florida's export carries no LY columns,
@@ -107,12 +108,42 @@ def _apply_exclusions(df):
     return df
 
 
+def _pick(raw, *names):
+    """Return the first column present in raw among known aliases —
+    the weekly exports have shipped with several naming conventions."""
+    for n in names:
+        if n in raw.columns:
+            return raw[n]
+    raise KeyError(f"none of {names} found; file has: {list(raw.columns)}")
+
+
 def load_northeast(master):
     raw = pd.read_excel(CAP_XLSX)
-    raw = raw[raw["Warehouse"].isin(CAP_WAREHOUSES)].copy()
-    raw["ItemNo"] = raw["ItemNo"].astype(str).str.strip()
+    df = pd.DataFrame({
+        "Warehouse": _pick(raw, "Warehouse", "Location[WarehouseCode]").astype(str).str.strip(),
+        "ItemNo": _pick(raw, "ItemNo", "KSI Item[ItemNo]").astype(str).str.strip(),
+        "CAP_ItemNum": _pick(raw, "CAP_ItemNum", "KSI Item[CAP_ItemNum]"),
+        "Product Desc": _pick(raw, "Product Desc", "[Product_Desc]").fillna(""),
+        "Model": _pick(raw, "Model", "[Model]").fillna(""),
+        "Final Velocity": _pick(raw, "Final Velocity", "Velocity[Final Velocity]").fillna(""),
+        "Volume": _pick(raw, "Volume", "[Volume]"),
+        "PY Volume": _pick(raw, "PY Volume", "[PY_Volume]"),
+        "Volume_Prior Year": _pick(raw, "Volume_Prior Year", "[Volume_Prior_Year]"),
+        "ADU": _pick(raw, "ADU", "[ADU]"),
+        "Rolling Avg 35 ADU": _pick(raw, "Rolling Avg 35 ADU", "[Rolling_Avg_35_ADU]"),
+        "Revenue": _pick(raw, "Revenue", "[Revenue]"),
+        "Location_Onhand": _pick(raw, "Location_Onhand", "[Location_Onhand]"),
+        "Location_OnOnDock": _pick(raw, "Location_OnOnDock", "[Location_OnOnDock]"),
+        "Location_InTransit": _pick(raw, "Location_InTransit", "[Location_InTransit]"),
+        "Location_OnOrder": _pick(raw, "Location_OnOrder", "[Location_OnOrder]"),
+    })
+    df = df[df["Warehouse"].isin(CAP_WAREHOUSES)].copy()
+    for c in ["Volume", "PY Volume", "Volume_Prior Year", "ADU",
+              "Rolling Avg 35 ADU", "Revenue", "Location_Onhand",
+              "Location_OnOnDock", "Location_InTransit", "Location_OnOrder"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    df = raw.merge(
+    df = df.merge(
         master.drop_duplicates("ItemNo")
         [["ItemNo", "Patent", "Companywide veloicty",
           "Primary Vendor", "Secondary Vendor"]],
@@ -120,10 +151,6 @@ def load_northeast(master):
     )
     df = _apply_exclusions(df)
     df["Region"] = "Northeast"
-    for c in ["Volume", "PY Volume", "Volume_Prior Year", "ADU",
-              "Rolling Avg 35 ADU", "Revenue", "Location_Onhand",
-              "Location_OnOnDock", "Location_InTransit", "Location_OnOrder"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
     return df[SCHEMA]
 
 
@@ -141,17 +168,19 @@ def master_by_link(master):
 def load_florida(master):
     raw = pd.read_excel(FL_XLSX, sheet_name="Export")
     df = pd.DataFrame({
-        "Warehouse": raw["Location[DC]"].astype(str).str.strip(),
-        "ItemNo": raw["Item[ItemNum]"].astype(str).str.strip(),
-        "Product Desc": raw["[Part_Desc]"].fillna(""),
-        "Final Velocity": raw["[Pod_velocity]"].fillna(""),
-        "Volume": pd.to_numeric(raw["[Volume]"], errors="coerce").fillna(0),
-        "ADU": pd.to_numeric(raw["[ADU]"], errors="coerce").fillna(0),
-        "Rolling Avg 35 ADU": pd.to_numeric(raw["[ADU_SO_L35]"], errors="coerce").fillna(0),
-        "Revenue": pd.to_numeric(raw["[Revenue]"], errors="coerce").fillna(0),
-        "Location_Onhand": pd.to_numeric(raw["[Location_Onhand]"], errors="coerce").fillna(0),
-        "Location_OnOrder": pd.to_numeric(raw["[Qty_InPipeLine]"], errors="coerce").fillna(0),
-        "_patented": raw["Item[Patented]"].fillna(False),
+        "Warehouse": _pick(raw, "Location[DC]", "DC").astype(str).str.strip(),
+        "ItemNo": _pick(raw, "Item[ItemNum]", "ItemNum").astype(str).str.strip(),
+        "Product Desc": _pick(raw, "[Part_Desc]", "Part Desc").fillna(""),
+        "Final Velocity": _pick(raw, "[Pod_velocity]", "Pod_velocity").fillna(""),
+        "Volume": pd.to_numeric(_pick(raw, "[Volume]", "Volume"), errors="coerce").fillna(0),
+        "ADU": pd.to_numeric(_pick(raw, "[ADU]", "ADU"), errors="coerce").fillna(0),
+        "Rolling Avg 35 ADU": pd.to_numeric(_pick(raw, "[ADU_SO_L35]", "ADU_Last_35"), errors="coerce").fillna(0),
+        "Revenue": pd.to_numeric(_pick(raw, "[Revenue]", "Revenue"), errors="coerce").fillna(0),
+        "Location_Onhand": pd.to_numeric(_pick(raw, "[Location_Onhand]", "OnHand"), errors="coerce").fillna(0),
+        "Location_OnOrder": pd.to_numeric(_pick(raw, "[Qty_InPipeLine]", "InPipeline"), errors="coerce").fillna(0),
+        # bool in the old export, 0/1 float in the new one
+        "_patented": _pick(raw, "Item[Patented]", "Patented")
+                     .map(lambda v: str(v).strip().lower() in ("true", "1", "1.0")),
     })
     df["Region"] = "Florida"
     df["CAP_ItemNum"] = ""
@@ -342,8 +371,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KSI Buy List - __DATE__</title>
 <style>
-:root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78;--s1:#2a78d6;--s2:#eb6834;--sx:#898781}
-@media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8;--s1:#3987e5;--s2:#d95926}}
+:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8;--s1:#3987e5;--s2:#d95926;--sx:#898781;color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink);padding:24px}
 h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:14px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
@@ -360,15 +388,14 @@ th{color:var(--mut);font-size:12px;cursor:pointer;user-select:none}
 input,select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px;color:var(--mut)}
 button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);cursor:pointer}
-.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--acc);color:#fff}
-.warn{background:#fff3cd;border:1px solid #ffe08a;color:#664d03;border-radius:8px;padding:10px 14px;margin-bottom:12px}
-@media (prefers-color-scheme: dark){.warn{background:#3a3020;border-color:#6b5a2a;color:#ffd97a}}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--acc);color:#0d1319}
+.warn{background:#3a3020;border:1px solid #6b5a2a;color:#ffd97a;border-radius:8px;padding:10px 14px;margin-bottom:12px}
 .ctrlbar{display:flex;gap:16px;align-items:center;margin:0 0 12px;flex-wrap:wrap}
 .lg{display:inline-flex;align-items:center;gap:6px;color:var(--mut);font-size:12px}
 .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
 .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .seg button{border:0;border-radius:0;padding:6px 12px;font-size:12px}
-.seg button.on{background:var(--acc);color:#fff}
+.seg button.on{background:var(--acc);color:#0d1319}
 .mlauto{margin-left:auto}
 .crow{display:grid;grid-template-columns:118px 1fr 76px;align-items:center;gap:8px;min-height:24px}
 .crow .nm{font-size:12px;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
