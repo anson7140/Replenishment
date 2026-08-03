@@ -250,9 +250,10 @@ def write_html(buys, warns, run_date, out_path):
                 .sort_values("Buy Qty", ascending=False))
     wh_sum = buys.groupby("Warehouse")["Buy Qty"].sum().reset_index()
 
-    rows = buys[["Warehouse", "ItemNo", "Product Desc", "Final Velocity",
-                 "Primary Vendor", "Vendor Type", "Demand ADU", "Target Days",
-                 "Target Qty", "Position", "Buy Qty"]].values.tolist()
+    rows = buys[["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
+                 "Final Velocity", "Primary Vendor", "Vendor Type",
+                 "Demand ADU", "Target Days", "Target Qty", "Position",
+                 "Buy Qty"]].values.tolist()
     payload = json.dumps(rows, default=str)
 
     stats = {
@@ -329,26 +330,27 @@ __WARNS__
 <select id="fwh"><option value="">All warehouses</option></select>
 <select id="fvt"><option value="">All vendor types</option><option>Oversea</option><option>Domestic</option></select>
 <select id="fvel"><option value="">All velocities</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
+<button id="csv" title="Downloads the rows matching the current filters">&#11015; Export CSV (filtered)</button>
 </div>
 <table id="tbl"><thead><tr>
-<th data-k="0">WH</th><th data-k="1">SKU</th><th data-k="2">Description</th><th data-k="3">Vel</th>
-<th data-k="4">Vendor</th><th data-k="5">Type</th><th data-k="6" class="num">Demand/day</th>
-<th data-k="7" class="num">Target days</th><th data-k="8" class="num">Target</th>
-<th data-k="9" class="num">Position</th><th data-k="10" class="num">Buy</th>
+<th data-k="0">WH</th><th data-k="1">SKU</th><th data-k="2">CAP Part #</th><th data-k="3">Description</th><th data-k="4">Vel</th>
+<th data-k="5">Vendor</th><th data-k="6">Type</th><th data-k="7" class="num">Demand/day</th>
+<th data-k="8" class="num">Target days</th><th data-k="9" class="num">Target</th>
+<th data-k="10" class="num">Position</th><th data-k="11" class="num">Buy</th>
 </tr></thead><tbody></tbody></table>
 <div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
 </div>
 <script>
-const DATA=__DATA__;let view=DATA.slice(),page=0,PS=100,sortK=10,sortD=-1;
+const DATA=__DATA__;let view=DATA.slice(),page=0,PS=100,sortK=11,sortD=-1;
 const $=id=>document.getElementById(id);
 [...new Set(DATA.map(r=>r[0]))].sort().forEach(w=>{const o=document.createElement('option');o.textContent=w;$('fwh').appendChild(o)});
 function apply(){const q=$('q').value.toLowerCase(),wh=$('fwh').value,vt=$('fvt').value,vl=$('fvel').value;
-view=DATA.filter(r=>(!wh||r[0]===wh)&&(!vt||r[5]===vt)&&(!vl||r[3]===vl)&&(!q||(r[1]+' '+r[2]+' '+r[4]).toLowerCase().includes(q)));
+view=DATA.filter(r=>(!wh||r[0]===wh)&&(!vt||r[6]===vt)&&(!vl||r[4]===vl)&&(!q||(r[1]+' '+r[2]+' '+r[3]+' '+r[5]).toLowerCase().includes(q)));
 view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
 page=0;render()}
 function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
 view.slice(page*PS,(page+1)*PS).forEach(r=>{const tr=document.createElement('tr');
-tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]||''}</td><td>${r[4]||'(none)'}</td><td>${r[5]||'-'}</td><td class="num">${(+r[6]).toFixed(3)}</td><td class="num">${r[7]}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num"><b>${r[10]}</b></td>`;
+tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td>${r[3]}</td><td>${r[4]||''}</td><td>${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td>`;
 tb.appendChild(tr)});
 $('count').textContent=view.length.toLocaleString()+' rows';
 $('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))}`}
@@ -356,6 +358,14 @@ $('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))
 $('prev').onclick=()=>{if(page>0){page--;render()}};
 $('next').onclick=()=>{if((page+1)*PS<view.length){page++;render()}};
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
+$('csv').onclick=()=>{
+const hdr=['Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty'];
+const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
+const csv=[hdr.join(',')].concat(view.map(r=>r.map(esc).join(','))).join('\r\n');
+const a=document.createElement('a');
+a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
+a.download='buy_list_'+document.title.split(' - ')[1]+'_'+(view.length===DATA.length?'all':'filtered')+'.csv';
+a.click();URL.revokeObjectURL(a.href)};
 apply();
 </script></body></html>
 """
