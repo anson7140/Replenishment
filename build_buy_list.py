@@ -22,8 +22,10 @@ Demand (units/selling-day) = YTD ADU x seasonal index.
   - Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate),
     computed from PY Volume (same period LY) and Volume_Prior Year (full LY),
     capped to [0.6, 1.8]; only applied when full-LY volume >= 6 units.
-  - "Rolling Avg 35 ADU" is NOT used as demand: the column is average units
-    per day-with-a-sale (75% of values are exactly 1.0), not units/day.
+  - Recency: if "Rolling Avg 35 ADU" is a true daily rate (auto-detected),
+    the base becomes 70% recent / 30% YTD. The current export's column is
+    average units per day-with-a-sale (75% of values are exactly 1.0), not
+    units/day, so it is auto-rejected and YTD ADU is used alone.
 
 Coverage target (selling days):
   - Primary vendor Oversea:  100 days  (+21 safety days if velocity A)
@@ -69,6 +71,12 @@ SAFETY_A_DOMESTIC = 7           # +1 week for A items, domestic primary
 SEASONAL_CAP = (0.6, 1.8)
 SEASONAL_MIN_LY_UNITS = 6       # need >=6 units full LY to trust a seasonal index
 
+# Recency blend, used only when the export's 35-day column is a true daily
+# rate (units sold last 35 days / 35). The current export's "Rolling Avg 35
+# ADU" is avg units per day-with-a-sale (median 1.0), which fails detection.
+RECENT_WEIGHT = 0.7             # 70% last-35-day ADU, 30% YTD ADU
+RECENT_VALID_MEDIAN = 0.5       # median of positive values must be below this
+
 
 def load_inputs():
     raw = pd.read_excel(RAW_XLSX)
@@ -110,6 +118,22 @@ def build(raw, master, vtype):
 
     df["ADU"] = df["ADU"].clip(lower=0)
 
+    # Recency detection: a real 35-day ADU has mostly-fractional values like
+    # YTD ADU. The broken per-active-day column has a positive-value median
+    # of 1.0 and gets rejected here.
+    r35 = df["Rolling Avg 35 ADU"].clip(lower=0)
+    pos = r35[r35 > 0]
+    recent_valid = len(pos) > 0 and pos.median() < RECENT_VALID_MEDIAN
+    if recent_valid:
+        base_adu = RECENT_WEIGHT * r35 + (1 - RECENT_WEIGHT) * df["ADU"]
+        demand_mode = (f"blend of {RECENT_WEIGHT:.0%} last-35-day ADU + "
+                       f"{1 - RECENT_WEIGHT:.0%} YTD ADU")
+    else:
+        base_adu = df["ADU"]
+        demand_mode = ("YTD ADU only ('Rolling Avg 35 ADU' column is not a "
+                       "daily rate in this export)")
+    df.attrs["demand_mode"] = demand_mode
+
     ly_same = df["PY Volume"].clip(lower=0)
     ly_full = df["Volume_Prior Year"].clip(lower=0)
     ly_remain = (ly_full - ly_same).clip(lower=0)
@@ -122,7 +146,7 @@ def build(raw, master, vtype):
         1.0,
     )
     df["Seasonal Index"] = np.clip(idx, *SEASONAL_CAP).round(3)
-    df["Demand ADU"] = (df["ADU"] * df["Seasonal Index"]).round(5)
+    df["Demand ADU"] = (base_adu * df["Seasonal Index"]).round(5)
 
     # --- coverage target ----------------------------------------------------
     oversea = df["Vendor Type"] == "Oversea"
@@ -184,9 +208,9 @@ def write_excel(df, buys, warns, out_path):
     exceptions = df[df["Vendor Missing"] & (df["Buy Qty"] > 0)][cols]
 
     assumptions = pd.DataFrame({"Assumption": [
-        "Demand basis: YTD ADU (Volume / 149 selling days, Jan 1 - Jul 31 2026) as provided in CAP Raw.",
+        f"Demand basis: {df.attrs.get('demand_mode', 'YTD ADU')}. YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw.",
         "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units.",
-        "'Rolling Avg 35 ADU' NOT used as demand: column is avg units per day-with-sales (75% of values = 1.0), not units/day. Re-export as total units last 35 days / 35 to enable recency weighting.",
+        "Recency weighting activates automatically once 'Rolling Avg 35 ADU' is exported as a true daily rate (total units last 35 days / 35); the current column (avg units per day-with-sales) is auto-rejected.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. A items add 21 safety days (oversea) / 7 (domestic). Days = selling days, same basis as ADU.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Excluded: patented items (Patent=1) and companywide P-velocity items per KSI_Item_master.",
@@ -345,6 +369,7 @@ def main():
     df = build(raw, master, vtype)
     buys = df[df["Buy Qty"] > 0].sort_values("Buy Qty", ascending=False)
 
+    print(f"demand mode: {df.attrs['demand_mode']}")
     warns = data_quality_warnings(df)
     for w in warns:
         print(f"WARNING: {w}")
