@@ -1,0 +1,10 @@
+# Whitelist mode: ignore everything, then allow only safe, non-data files.
+# Raw exports (CAP Raw.xlsx, KSI_Item_master.csv, Vendor and Type.csv) and
+# xlsx outputs must NEVER be pushed - this repo is public.
+*
+!.gitignore
+!README.md
+!index.html
+!build_buy_list.py
+!assertions/
+!assertions/*.py

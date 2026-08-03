@@ -1,0 +1,369 @@
+"""
+KSI Weekly Buy List Builder
+===========================
+Rerun weekly after dropping the new "CAP Raw.xlsx" into this folder:
+
+    python build_buy_list.py
+
+Inputs (this folder):
+  - CAP Raw.xlsx        location-level YTD sales/inventory export
+  - KSI_Item_master.csv item master (patent flag, velocity, vendors)
+  - Vendor and Type.csv vendor -> Domestic / Oversea
+
+Outputs (output/ subfolder):
+  - Buy List <date>.xlsx   (Buy List, Vendor Summary, Warehouse Summary,
+                            Exceptions, Assumptions)
+  - index.html             self-contained interactive report (GitHub-ready)
+
+Methodology
+-----------
+Demand (units/selling-day) = YTD ADU x seasonal index.
+  - YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31, 2026), as provided.
+  - Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate),
+    computed from PY Volume (same period LY) and Volume_Prior Year (full LY),
+    capped to [0.6, 1.8]; only applied when full-LY volume >= 6 units.
+  - "Rolling Avg 35 ADU" is NOT used as demand: the column is average units
+    per day-with-a-sale (75% of values are exactly 1.0), not units/day.
+
+Coverage target (selling days):
+  - Primary vendor Oversea:  100 days  (+21 safety days if velocity A)
+  - Primary vendor Domestic:  14 days  (+7 safety days if velocity A)
+
+Target inventory = ceil(demand x target days)
+Position         = Onhand + OnDock + InTransit + OnOrder
+Buy qty          = max(0, target - position)
+
+Exclusions: patented items (Patent=1) and P-velocity items from the master.
+Rows with no primary vendor default to the Domestic target and are flagged.
+"""
+
+import math
+import os
+import sys
+import warnings
+from datetime import date
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(HERE, "output")
+
+RAW_XLSX = os.path.join(HERE, "CAP Raw.xlsx")
+MASTER_CSV = os.path.join(HERE, "KSI_Item_master.csv")
+VENDOR_CSV = os.path.join(HERE, "Vendor and Type.csv")
+
+WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"]
+
+SELLING_DAYS_YTD = 149          # Jan 1 - Jul 31 2026 selling days (Volume/ADU in export)
+CAL_DAYS_SAME = 212             # calendar days Jan 1 - Jul 31
+CAL_DAYS_REMAIN = 153           # calendar days Aug 1 - Dec 31
+
+OVERSEA_DAYS = 100
+DOMESTIC_DAYS = 14
+SAFETY_A_OVERSEA = 21           # +3 weeks for A items, overseas primary
+SAFETY_A_DOMESTIC = 7           # +1 week for A items, domestic primary
+
+SEASONAL_CAP = (0.6, 1.8)
+SEASONAL_MIN_LY_UNITS = 6       # need >=6 units full LY to trust a seasonal index
+
+
+def load_inputs():
+    raw = pd.read_excel(RAW_XLSX)
+    raw = raw[raw["Warehouse"].isin(WAREHOUSES)].copy()
+    raw["ItemNo"] = raw["ItemNo"].astype(str).str.strip()
+
+    master = pd.read_csv(MASTER_CSV, encoding="utf-8-sig")
+    master["ItemNo"] = master["ItemNo"].astype(str).str.strip()
+    master = master.drop_duplicates("ItemNo")
+
+    vend = pd.read_csv(VENDOR_CSV, encoding="utf-8-sig")
+    vend["V1"] = vend["V1"].astype(str).str.strip()
+    vtype = dict(zip(vend["V1"], vend["V1Type"]))
+    return raw, master, vtype
+
+
+def build(raw, master, vtype):
+    df = raw.merge(
+        master[["ItemNo", "Patent", "Companywide veloicty",
+                "Primary Vendor", "Secondary Vendor"]],
+        on="ItemNo", how="left",
+    )
+
+    # --- exclusions ---------------------------------------------------------
+    df = df[(df["Patent"].fillna(0) != 1)]
+    df = df[df["Companywide veloicty"].fillna("") != "P"]
+
+    # --- vendor type --------------------------------------------------------
+    df["Primary Vendor"] = df["Primary Vendor"].fillna("").astype(str).str.strip()
+    df["Secondary Vendor"] = df["Secondary Vendor"].fillna("").astype(str).str.strip()
+    df["Vendor Type"] = df["Primary Vendor"].map(vtype).fillna("")
+    df["Vendor Missing"] = df["Primary Vendor"] == ""
+
+    # --- demand -------------------------------------------------------------
+    for c in ["Volume", "PY Volume", "Volume_Prior Year", "ADU", "PY ADU",
+              "Location_Onhand", "Location_OnOnDock", "Location_InTransit",
+              "Location_OnOrder", "Rolling Avg 35 ADU", "Revenue"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
+    df["ADU"] = df["ADU"].clip(lower=0)
+
+    ly_same = df["PY Volume"].clip(lower=0)
+    ly_full = df["Volume_Prior Year"].clip(lower=0)
+    ly_remain = (ly_full - ly_same).clip(lower=0)
+
+    rate_same = ly_same / CAL_DAYS_SAME
+    rate_remain = ly_remain / CAL_DAYS_REMAIN
+    idx = np.where(
+        (ly_full >= SEASONAL_MIN_LY_UNITS) & (rate_same > 0),
+        (rate_remain / rate_same.replace(0, np.nan)).fillna(1.0),
+        1.0,
+    )
+    df["Seasonal Index"] = np.clip(idx, *SEASONAL_CAP).round(3)
+    df["Demand ADU"] = (df["ADU"] * df["Seasonal Index"]).round(5)
+
+    # --- coverage target ----------------------------------------------------
+    oversea = df["Vendor Type"] == "Oversea"
+    is_a = df["Final Velocity"].fillna("") == "A"
+
+    df["Lead Days"] = np.where(oversea, OVERSEA_DAYS, DOMESTIC_DAYS)
+    df["Safety Days"] = np.where(
+        is_a, np.where(oversea, SAFETY_A_OVERSEA, SAFETY_A_DOMESTIC), 0
+    )
+    df["Target Days"] = df["Lead Days"] + df["Safety Days"]
+
+    df["Target Qty"] = np.ceil(df["Demand ADU"] * df["Target Days"]).astype(int)
+    df["Position"] = (
+        df["Location_Onhand"] + df["Location_OnOnDock"]
+        + df["Location_InTransit"] + df["Location_OnOrder"]
+    ).astype(int)
+    df["Buy Qty"] = (df["Target Qty"] - df["Position"]).clip(lower=0).astype(int)
+    return df
+
+
+def data_quality_warnings(df):
+    warns = []
+    for wh, g in df.groupby("Warehouse"):
+        if g["Volume"].sum() == 0 and g["Position"].sum() == 0:
+            warns.append(
+                f"Warehouse {wh}: all volume and inventory are zero in this export "
+                f"({len(g):,} rows) - likely truncated by the source system "
+                f"('Exported data exceeded the allowed volume'). No buys generated for {wh}; re-export needed."
+            )
+    n_noveil = int((df["Vendor Missing"] & (df["Buy Qty"] > 0)).sum())
+    if n_noveil:
+        warns.append(
+            f"{n_noveil} buy lines have no primary vendor in KSI_Item_master - "
+            f"defaulted to the Domestic 14-day target; see Exceptions sheet."
+        )
+    return warns
+
+
+def write_excel(df, buys, warns, out_path):
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    cols = ["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc", "Model",
+            "Final Velocity", "Primary Vendor", "Vendor Type", "Secondary Vendor",
+            "ADU", "Seasonal Index", "Demand ADU", "Lead Days", "Safety Days",
+            "Target Days", "Target Qty", "Location_Onhand", "Location_OnOnDock",
+            "Location_InTransit", "Location_OnOrder", "Position", "Buy Qty",
+            "Volume", "PY Volume", "Volume_Prior Year", "Rolling Avg 35 ADU"]
+
+    vend_sum = (buys.groupby(["Primary Vendor", "Vendor Type"], dropna=False)
+                .agg(SKU_Locations=("ItemNo", "size"),
+                     Unique_SKUs=("ItemNo", "nunique"),
+                     Buy_Units=("Buy Qty", "sum"))
+                .reset_index().sort_values("Buy_Units", ascending=False))
+    wh_sum = (buys.groupby("Warehouse")
+              .agg(SKU_Locations=("ItemNo", "size"),
+                   Buy_Units=("Buy Qty", "sum"))
+              .reset_index().sort_values("Buy_Units", ascending=False))
+    exceptions = df[df["Vendor Missing"] & (df["Buy Qty"] > 0)][cols]
+
+    assumptions = pd.DataFrame({"Assumption": [
+        "Demand basis: YTD ADU (Volume / 149 selling days, Jan 1 - Jul 31 2026) as provided in CAP Raw.",
+        "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units.",
+        "'Rolling Avg 35 ADU' NOT used as demand: column is avg units per day-with-sales (75% of values = 1.0), not units/day. Re-export as total units last 35 days / 35 to enable recency weighting.",
+        "Coverage: Oversea primary = 100 days; Domestic = 14 days. A items add 21 safety days (oversea) / 7 (domestic). Days = selling days, same basis as ADU.",
+        "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
+        "Excluded: patented items (Patent=1) and companywide P-velocity items per KSI_Item_master.",
+        "Rows with no primary vendor use the Domestic 14-day target and appear on the Exceptions sheet - assign vendors to fix.",
+        "Source export warning: 'Exported data exceeded the allowed volume. Some data may have been omitted.' appears in CAP Raw - some rows may be missing from the source.",
+        "Negative ADU (net returns) treated as zero demand.",
+    ] + ["DATA WARNING: " + w for w in warns]})
+
+    with pd.ExcelWriter(out_path, engine="openpyxl") as xw:
+        buys[cols].to_excel(xw, sheet_name="Buy List", index=False)
+        vend_sum.to_excel(xw, sheet_name="Vendor Summary", index=False)
+        wh_sum.to_excel(xw, sheet_name="Warehouse Summary", index=False)
+        exceptions.to_excel(xw, sheet_name="Exceptions", index=False)
+        assumptions.to_excel(xw, sheet_name="Assumptions", index=False)
+
+        wb = xw.book
+        hdr_fill = PatternFill("solid", fgColor="1F4E78")
+        for ws in wb.worksheets:
+            for cell in ws[1]:
+                cell.font = Font(name="Arial", bold=True, color="FFFFFF")
+                cell.fill = hdr_fill
+            ws.freeze_panes = "A2"
+            for i, col in enumerate(ws.iter_cols(min_row=1, max_row=1), 1):
+                width = min(max(len(str(col[0].value or "")) + 2, 10), 55)
+                ws.column_dimensions[get_column_letter(i)].width = width
+            ws.auto_filter.ref = ws.dimensions
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.font = Font(name="Arial")
+
+
+def write_html(buys, warns, run_date, out_path):
+    import json
+
+    vend_sum = (buys.groupby(["Primary Vendor", "Vendor Type"], dropna=False)
+                ["Buy Qty"].sum().reset_index()
+                .sort_values("Buy Qty", ascending=False))
+    wh_sum = buys.groupby("Warehouse")["Buy Qty"].sum().reset_index()
+
+    rows = buys[["Warehouse", "ItemNo", "Product Desc", "Final Velocity",
+                 "Primary Vendor", "Vendor Type", "Demand ADU", "Target Days",
+                 "Target Qty", "Position", "Buy Qty"]].values.tolist()
+    payload = json.dumps(rows, default=str)
+
+    stats = {
+        "skuLoc": f"{len(buys):,}",
+        "units": f"{int(buys['Buy Qty'].sum()):,}",
+        "oversea": f"{int(buys.loc[buys['Vendor Type']=='Oversea','Buy Qty'].sum()):,}",
+        "domestic": f"{int(buys.loc[buys['Vendor Type']=='Domestic','Buy Qty'].sum()):,}",
+    }
+    vend_rows = "".join(
+        f"<tr><td>{r['Primary Vendor'] or '(none)'}</td><td>{r['Vendor Type'] or '-'}</td>"
+        f"<td class='num'>{int(r['Buy Qty']):,}</td></tr>"
+        for _, r in vend_sum.head(25).iterrows())
+    wh_rows = "".join(
+        f"<tr><td>{r['Warehouse']}</td><td class='num'>{int(r['Buy Qty']):,}</td></tr>"
+        for _, r in wh_sum.sort_values('Buy Qty', ascending=False).iterrows())
+
+    warn_html = "".join(f'<div class="warn">&#9888;&#65039; {w}</div>' for w in warns)
+
+    html = HTML_TEMPLATE
+    for k, v in {"__DATE__": run_date, "__WARNS__": warn_html,
+                 "__SKULOC__": stats["skuLoc"],
+                 "__UNITS__": stats["units"], "__OVERSEA__": stats["oversea"],
+                 "__DOMESTIC__": stats["domestic"], "__VENDROWS__": vend_rows,
+                 "__WHROWS__": wh_rows, "__DATA__": payload}.items():
+        html = html.replace(k, v)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+
+HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KSI Buy List - __DATE__</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1a2733;--mut:#5c6b7a;--line:#e3e8ee;--acc:#1f4e78}
+@media (prefers-color-scheme: dark){:root{--bg:#12181f;--card:#1a232d;--ink:#e8edf2;--mut:#8fa0b0;--line:#2a3642;--acc:#6aa5d8}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--ink);padding:24px}
+h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:20px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card .v{font-size:22px;font-weight:700}.card .l{color:var(--mut);font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+@media(max-width:800px){.grid2{grid-template-columns:1fr}}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto}
+.panel h2{font-size:14px;margin:0 0 10px}
+table{border-collapse:collapse;width:100%}th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{color:var(--mut);font-size:12px;cursor:pointer;user-select:none}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+input,select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
+.pager{display:flex;gap:8px;align-items:center;margin-top:10px;color:var(--mut)}
+button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink);cursor:pointer}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;background:var(--acc);color:#fff}
+.warn{background:#fff3cd;border:1px solid #ffe08a;color:#664d03;border-radius:8px;padding:10px 14px;margin-bottom:12px}
+@media (prefers-color-scheme: dark){.warn{background:#3a3020;border-color:#6b5a2a;color:#ffd97a}}
+</style></head><body>
+<h1>KSI Replenishment Buy List</h1>
+<div class="sub">Generated __DATE__ &middot; demand = YTD ADU &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
+__WARNS__
+<div class="cards">
+<div class="card"><div class="v">__SKULOC__</div><div class="l">SKU-locations to buy</div></div>
+<div class="card"><div class="v">__UNITS__</div><div class="l">Total buy units</div></div>
+<div class="card"><div class="v">__OVERSEA__</div><div class="l">Oversea vendor units</div></div>
+<div class="card"><div class="v">__DOMESTIC__</div><div class="l">Domestic vendor units</div></div>
+</div>
+<div class="grid2">
+<div class="panel"><h2>Top vendors by buy units</h2><table><thead><tr><th>Vendor</th><th>Type</th><th class="num">Buy units</th></tr></thead><tbody>__VENDROWS__</tbody></table></div>
+<div class="panel"><h2>Buy units by warehouse</h2><table><thead><tr><th>Warehouse</th><th class="num">Buy units</th></tr></thead><tbody>__WHROWS__</tbody></table></div>
+</div>
+<div class="panel">
+<h2>Buy list detail <span class="badge" id="count"></span></h2>
+<div class="controls">
+<input id="q" placeholder="Search SKU / description / vendor" size="34">
+<select id="fwh"><option value="">All warehouses</option></select>
+<select id="fvt"><option value="">All vendor types</option><option>Oversea</option><option>Domestic</option></select>
+<select id="fvel"><option value="">All velocities</option><option>A</option><option>B</option><option>C</option><option>D</option></select>
+</div>
+<table id="tbl"><thead><tr>
+<th data-k="0">WH</th><th data-k="1">SKU</th><th data-k="2">Description</th><th data-k="3">Vel</th>
+<th data-k="4">Vendor</th><th data-k="5">Type</th><th data-k="6" class="num">Demand/day</th>
+<th data-k="7" class="num">Target days</th><th data-k="8" class="num">Target</th>
+<th data-k="9" class="num">Position</th><th data-k="10" class="num">Buy</th>
+</tr></thead><tbody></tbody></table>
+<div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
+</div>
+<script>
+const DATA=__DATA__;let view=DATA.slice(),page=0,PS=100,sortK=10,sortD=-1;
+const $=id=>document.getElementById(id);
+[...new Set(DATA.map(r=>r[0]))].sort().forEach(w=>{const o=document.createElement('option');o.textContent=w;$('fwh').appendChild(o)});
+function apply(){const q=$('q').value.toLowerCase(),wh=$('fwh').value,vt=$('fvt').value,vl=$('fvel').value;
+view=DATA.filter(r=>(!wh||r[0]===wh)&&(!vt||r[5]===vt)&&(!vl||r[3]===vl)&&(!q||(r[1]+' '+r[2]+' '+r[4]).toLowerCase().includes(q)));
+view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
+page=0;render()}
+function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
+view.slice(page*PS,(page+1)*PS).forEach(r=>{const tr=document.createElement('tr');
+tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]||''}</td><td>${r[4]||'(none)'}</td><td>${r[5]||'-'}</td><td class="num">${(+r[6]).toFixed(3)}</td><td class="num">${r[7]}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num"><b>${r[10]}</b></td>`;
+tb.appendChild(tr)});
+$('count').textContent=view.length.toLocaleString()+' rows';
+$('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))}`}
+['q','fwh','fvt','fvel'].forEach(id=>$(id).addEventListener('input',apply));
+$('prev').onclick=()=>{if(page>0){page--;render()}};
+$('next').onclick=()=>{if((page+1)*PS<view.length){page++;render()}};
+document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
+apply();
+</script></body></html>
+"""
+
+
+def main():
+    os.makedirs(OUT_DIR, exist_ok=True)
+    run_date = date.today().isoformat()
+
+    raw, master, vtype = load_inputs()
+    df = build(raw, master, vtype)
+    buys = df[df["Buy Qty"] > 0].sort_values("Buy Qty", ascending=False)
+
+    warns = data_quality_warnings(df)
+    for w in warns:
+        print(f"WARNING: {w}")
+
+    xlsx_path = os.path.join(OUT_DIR, f"Buy List {run_date}.xlsx")
+    write_excel(df, buys, warns, xlsx_path)
+    write_html(buys, warns, run_date, os.path.join(OUT_DIR, "index.html"))
+    # copy to repo root so GitHub Pages can serve it
+    import shutil
+    shutil.copyfile(os.path.join(OUT_DIR, "index.html"), os.path.join(HERE, "index.html"))
+
+    print(f"rows after filters: {len(df):,}")
+    print(f"buy lines: {len(buys):,}  buy units: {int(buys['Buy Qty'].sum()):,}")
+    print(f"  oversea units: {int(buys.loc[buys['Vendor Type']=='Oversea','Buy Qty'].sum()):,}")
+    print(f"  domestic units: {int(buys.loc[buys['Vendor Type']=='Domestic','Buy Qty'].sum()):,}")
+    print(f"  missing-vendor lines: {int((buys['Vendor Missing']).sum()):,}")
+    print(f"wrote: {xlsx_path}")
+    print(f"wrote: {os.path.join(OUT_DIR, 'index.html')}")
+
+
+if __name__ == "__main__":
+    main()
