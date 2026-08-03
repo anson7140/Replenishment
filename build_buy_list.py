@@ -13,7 +13,8 @@ Inputs (this folder):
 Outputs (output/ subfolder):
   - Buy List <date>.xlsx   (Buy List, Vendor Summary, Warehouse Summary,
                             Exceptions, Assumptions)
-  - index.html             self-contained interactive report (GitHub-ready)
+  - CAP.html               self-contained interactive report (GitHub-ready)
+  - index.html             redirect to CAP.html for the Pages homepage
 
 Methodology
 -----------
@@ -403,7 +404,7 @@ def main():
     print(f"  domestic units: {int(buys.loc[buys['Vendor Type']=='Domestic','Buy Qty'].sum()):,}")
     print(f"  missing-vendor lines: {int((buys['Vendor Missing']).sum()):,}")
     print(f"wrote: {xlsx_path}")
-    print(f"wrote: {os.path.join(OUT_DIR, 'index.html')}")
+    print(f"wrote: {os.path.join(OUT_DIR, 'CAP.html')}")
 
 
 if __name__ == "__main__":
