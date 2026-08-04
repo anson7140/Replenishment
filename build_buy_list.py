@@ -254,14 +254,31 @@ def compute(df, vtype):
     ).astype(int)
     df["Buy Qty"] = (df["Target Qty"] - df["Position"]).clip(lower=0).astype(int)
 
-    # 15MP is the NE overflow hub: expose its onhand+intransit per SKU on the
-    # other NE warehouses' rows, so a transfer can replace a buy when it covers.
+    # 15MP is the NE overflow hub. Expose its onhand+intransit per SKU on the
+    # other NE warehouses' rows, then NET it across those rows: one unit at
+    # 15MP can only cover one warehouse, so allocate highest-demand first.
     hub = df[(df["Region"] == "Northeast") & (df["Warehouse"] == "15MP")]
     avail15 = (hub["Location_Onhand"] + hub["Location_InTransit"]).groupby(
         hub["ItemNo"]).sum()
-    df["15MP Avail"] = np.where(
-        (df["Region"] == "Northeast") & (df["Warehouse"] != "15MP"),
-        df["ItemNo"].map(avail15).fillna(0), np.nan)
+    is_ne_other = (df["Region"] == "Northeast") & (df["Warehouse"] != "15MP")
+    df["15MP Avail"] = np.where(is_ne_other,
+                               df["ItemNo"].map(avail15).fillna(0), np.nan)
+
+    df["15MP Alloc"] = np.where(is_ne_other, 0.0, np.nan)
+    cand = df[is_ne_other & (df["Buy Qty"] > 0)
+              & (df["15MP Avail"] > 0)].sort_values(
+        ["ItemNo", "Demand ADU"], ascending=[True, False])
+    alloc = {}
+    remaining = {}
+    for idx, item, need, avail in zip(cand.index, cand["ItemNo"],
+                                      cand["Buy Qty"], cand["15MP Avail"]):
+        left = remaining.get(item, avail)
+        take = min(left, need)
+        if take > 0:
+            alloc[idx] = take
+            remaining[item] = left - take
+    if alloc:
+        df.loc[list(alloc), "15MP Alloc"] = list(alloc.values())
 
     df.attrs["demand_modes"] = modes
     return df
@@ -307,7 +324,8 @@ def write_excel(df, buys, warns, out_path):
             "Lead Days", "Safety Days", "Target Days", "Target Qty",
             "Location_Onhand", "Location_OnOnDock", "Location_InTransit",
             "Location_OnOrder", "Position", "Buy Qty", "15MP Avail",
-            "Volume", "PY Volume", "Volume_Prior Year", "Rolling Avg 35 ADU"]
+            "15MP Alloc", "Volume", "PY Volume", "Volume_Prior Year",
+            "Rolling Avg 35 ADU"]
 
     vend_sum = (buys.groupby(["Region", "Primary Vendor", "Vendor Type"], dropna=False)
                 .agg(SKU_Locations=("ItemNo", "size"),
@@ -365,6 +383,7 @@ def write_html(buys, warns, run_date, out_path):
                 "Demand ADU", "Target Days", "Target Qty", "Position",
                 "Buy Qty", "Region"]].copy()
     tbl["15MP Avail"] = buys["15MP Avail"].fillna(-1).astype(int)  # -1 = n/a
+    tbl["15MP Alloc"] = buys["15MP Alloc"].fillna(0).astype(int)
     payload = json.dumps(tbl.values.tolist(), default=str)
 
     warn_html = "".join(f'<div class="warn">&#9888;&#65039; {w}</div>' for w in warns)
@@ -418,6 +437,17 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 .bseg.end{border-radius:0 4px 4px 0}
 #tip{position:fixed;z-index:10;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.45;pointer-events:none;display:none;box-shadow:0 4px 14px rgba(0,0,0,.18)}
 .ok{color:#0ca30c;font-weight:700}
+.part{color:#fab219;font-weight:700}
+.ms{position:relative;display:inline-block}
+.msbtn{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.msbtn .cnt{background:var(--acc);color:#0d1319;border-radius:9px;padding:0 6px;font-size:11px;font-weight:700}
+.msbtn .car{color:var(--mut);font-size:10px}
+.mspanel{display:none;position:absolute;z-index:20;top:calc(100% + 4px);left:0;min-width:190px;max-height:280px;overflow-y:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+.mspanel.open{display:block}
+.msopt{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;cursor:pointer;font-size:13px;white-space:nowrap}
+.msopt:hover{background:var(--bg)}
+.msopt input{margin:0;accent-color:var(--acc)}
+.msall{border-bottom:1px solid var(--line);margin-bottom:4px;padding-bottom:7px;color:var(--mut)}
 </style></head><body>
 <h1>KSI Replenishment Buy List</h1>
 <div class="sub">Generated __DATE__ &middot; demand = recency-weighted ADU (where available) &times; seasonal index &middot; oversea 100d / domestic 14d (+A-item safety)</div>
@@ -444,9 +474,9 @@ __WARNS__
 <h2>Buy list detail <span class="badge" id="count"></span></h2>
 <div class="controls">
 <input id="q" placeholder="Search SKU / CAP # / description / vendor" size="36">
-<select id="fwh"><option value="">All warehouses</option></select>
-<select id="fvt"><option value="">All vendor types</option><option>Oversea</option><option>Domestic</option></select>
-<select id="fvel"><option value="">All velocities</option></select>
+<span class="ms" id="msWh"></span>
+<span class="ms" id="msVt"></span>
+<span class="ms" id="msVel"></span>
 <button id="csv" title="Downloads the rows matching the current filters">&#11015; Export CSV (filtered)</button>
 </div>
 <table id="tbl"><thead><tr>
@@ -454,7 +484,7 @@ __WARNS__
 <th data-k="5">Vendor</th><th data-k="6">Type</th><th data-k="7" class="num">Demand/day</th>
 <th data-k="8" class="num">Target days</th><th data-k="9" class="num">Target</th>
 <th data-k="10" class="num">Position</th><th data-k="11" class="num">Buy</th>
-<th data-k="13" class="num" title="15MP onhand + intransit for this SKU (Northeast only). &#10003; = covers this row's buy qty - consider transferring instead of buying.">15MP avail</th>
+<th data-k="14" class="num" title="15MP onhand + intransit for this SKU (Northeast only), netted across warehouses - highest demand claims first. &#10003; = fully coverable by transfer; (n) = only n units claimable for this row. Sorts by claimable qty.">15MP avail</th>
 </tr></thead><tbody></tbody></table>
 <div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
 </div>
@@ -473,34 +503,63 @@ rseg.appendChild(b)});
 rseg.firstChild.classList.add('on');
 if(REGIONS.length<2)rseg.parentElement.style.display='none';
 
-function refreshFilters(){
-const cur=$('fwh').value,rows=RDATA();
-$('fwh').innerHTML='<option value="">All warehouses</option>';
-[...new Set(rows.map(r=>r[0]))].sort().forEach(w=>{const o=document.createElement('option');o.textContent=w;$('fwh').appendChild(o)});
-if([...$('fwh').options].some(o=>o.value===cur))$('fwh').value=cur;
-const curV=$('fvel').value;
-$('fvel').innerHTML='<option value="">All velocities</option>';
-[...new Set(rows.map(r=>r[4]).filter(Boolean))].sort().forEach(v=>{const o=document.createElement('option');o.textContent=v;$('fvel').appendChild(o)});
-if([...$('fvel').options].some(o=>o.value===curV))$('fvel').value=curV;}
-function apply(){const q=$('q').value.toLowerCase(),wh=$('fwh').value,vt=$('fvt').value,vl=$('fvel').value;
-view=RDATA().filter(r=>(!wh||r[0]===wh)&&(!vt||r[6]===vt)&&(!vl||r[4]===vl)&&(!q||(r[1]+' '+r[2]+' '+r[3]+' '+r[5]).toLowerCase().includes(q)));
+// multi-select dropdown: empty selection = all (no filter)
+function makeMS(elId,allLabel,noun){
+const el=$(elId),sel=new Set();let opts=[];
+const btn=document.createElement('button');btn.className='msbtn';
+const panel=document.createElement('div');panel.className='mspanel';
+el.append(btn,panel);
+btn.onclick=e=>{e.stopPropagation();const was=panel.classList.contains('open');
+document.querySelectorAll('.mspanel.open').forEach(p=>p.classList.remove('open'));
+if(!was)panel.classList.add('open')};
+panel.onclick=e=>e.stopPropagation();
+function label(){btn.innerHTML=sel.size===0?`${allLabel} <span class="car">&#9662;</span>`
+:(sel.size===1?[...sel][0]:`${sel.size} ${noun}`)+` <span class="cnt">${sel.size}</span> <span class="car">&#9662;</span>`}
+function build(){panel.innerHTML='';
+const all=document.createElement('label');all.className='msopt msall';
+all.innerHTML=`<input type="checkbox" ${sel.size===0?'checked':''}><span>${allLabel}</span>`;
+all.querySelector('input').onchange=()=>{sel.clear();build();label();apply()};
+panel.appendChild(all);
+for(const o of opts){const l=document.createElement('label');l.className='msopt';
+l.innerHTML=`<input type="checkbox" ${sel.has(o)?'checked':''}><span>${o}</span>`;
+l.querySelector('input').onchange=ev=>{ev.target.checked?sel.add(o):sel.delete(o);build();label();apply()};
+panel.appendChild(l)}}
+return{setOptions(list){opts=list;[...sel].forEach(v=>{if(!opts.includes(v))sel.delete(v)});build();label()},
+match(v){return sel.size===0||sel.has(v)}}}
+const MS={wh:makeMS('msWh','All warehouses','warehouses'),
+vt:makeMS('msVt','All vendor types','types'),
+vel:makeMS('msVel','All velocities','velocities')};
+document.addEventListener('click',()=>document.querySelectorAll('.mspanel.open').forEach(p=>p.classList.remove('open')));
+document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelectorAll('.mspanel.open').forEach(p=>p.classList.remove('open'))});
+
+function refreshFilters(){const rows=RDATA();
+MS.wh.setOptions([...new Set(rows.map(r=>r[0]))].sort());
+MS.vt.setOptions([...new Set(rows.map(r=>r[6]).filter(Boolean))].sort());
+MS.vel.setOptions([...new Set(rows.map(r=>r[4]).filter(Boolean))].sort())}
+function apply(){const q=$('q').value.toLowerCase();
+view=RDATA().filter(r=>MS.wh.match(r[0])&&MS.vt.match(r[6])&&MS.vel.match(r[4])&&(!q||(r[1]+' '+r[2]+' '+r[3]+' '+r[5]).toLowerCase().includes(q)));
 view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
 page=0;render()}
 function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
 view.slice(page*PS,(page+1)*PS).forEach(r=>{const tr=document.createElement('tr');
-const av=r[13]<0?'':r[13].toLocaleString()+(r[13]>=r[11]?' <span class="ok">&#10003;</span>':'');
-tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td>${r[3]}</td><td>${r[4]||''}</td><td>${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td><td class="num">${av}</td>`;
+let av='',avt='';
+if(r[13]>=0){const avail=r[13],alloc=r[14],buy=r[11];
+av=avail.toLocaleString();
+if(alloc>=buy&&buy>0){av+=' <span class="ok">&#10003;</span>';avt=`15MP has ${avail}; ${alloc} claimable for this row - covers the full ${buy}-unit buy. Transfer instead of buying.`}
+else if(alloc>0){av+=` <span class="part">(${alloc})</span>`;avt=`15MP has ${avail}, but only ${alloc} is left for this row after higher-demand warehouses claim theirs. Partial transfer; still buy ${buy-alloc}.`}
+else if(avail>0){avt=`15MP has ${avail}, but it is fully claimed by higher-demand warehouses for this SKU. No transfer available - buy all ${buy}.`}}
+tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td>${r[3]}</td><td>${r[4]||''}</td><td>${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td><td class="num" title="${avt}">${av}</td>`;
 tb.appendChild(tr)});
 $('count').textContent=view.length.toLocaleString()+' rows';
 $('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))}`}
-['q','fwh','fvt','fvel'].forEach(id=>$(id).addEventListener('input',apply));
+$('q').addEventListener('input',apply);
 $('prev').onclick=()=>{if(page>0){page--;render()}};
 $('next').onclick=()=>{if((page+1)*PS<view.length){page++;render()}};
 document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
 $('csv').onclick=()=>{
-const hdr=['Region','Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty','15MP Avail','15MP Covers Buy'];
+const hdr=['Region','Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty','15MP Avail','15MP Claimable','Buy After 15MP Transfer'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
-const csv=[hdr.join(',')].concat(view.map(r=>[r[12],...r.slice(0,12),r[13]<0?'':r[13],r[13]<0?'':(r[13]>=r[11]?'Y':'N')].map(esc).join(','))).join('\r\n');
+const csv=[hdr.join(',')].concat(view.map(r=>[r[12],...r.slice(0,12),r[13]<0?'':r[13],r[13]<0?'':r[14],r[13]<0?r[11]:r[11]-r[14]].map(esc).join(','))).join('\r\n');
 const a=document.createElement('a');
 a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
 const reg=(REGION||'all-regions').toLowerCase().replace(/\s+/g,'-');
