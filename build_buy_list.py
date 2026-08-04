@@ -411,8 +411,22 @@ h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:14px}
 @media(max-width:800px){.grid2{grid-template-columns:1fr}}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow-x:auto}
 .panel h2{font-size:14px;margin:0 0 10px}
-table{border-collapse:collapse;width:100%}th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-th{color:var(--mut);font-size:12px;cursor:pointer;user-select:none}
+table{border-collapse:collapse;width:100%;font-size:12px;table-layout:fixed}
+th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+th{color:var(--mut);font-size:11px;cursor:pointer;user-select:none}
+#tbl th:nth-child(1),#tbl td:nth-child(1){width:52px}
+#tbl th:nth-child(2),#tbl td:nth-child(2){width:78px}
+#tbl th:nth-child(3),#tbl td:nth-child(3){width:82px}
+#tbl th:nth-child(4),#tbl td:nth-child(4){width:auto;min-width:150px}
+#tbl th:nth-child(5),#tbl td:nth-child(5){width:34px}
+#tbl th:nth-child(6),#tbl td:nth-child(6){width:88px}
+#tbl th:nth-child(7),#tbl td:nth-child(7){width:64px}
+#tbl th:nth-child(8),#tbl td:nth-child(8){width:72px}
+#tbl th:nth-child(9),#tbl td:nth-child(9){width:52px}
+#tbl th:nth-child(10),#tbl td:nth-child(10){width:52px}
+#tbl th:nth-child(11),#tbl td:nth-child(11){width:56px}
+#tbl th:nth-child(12),#tbl td:nth-child(12){width:48px}
+#tbl th:nth-child(13),#tbl td:nth-child(13){width:76px}
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 input,select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
@@ -482,9 +496,9 @@ __WARNS__
 </div>
 <table id="tbl"><thead><tr>
 <th data-k="0">WH</th><th data-k="1">SKU</th><th data-k="2">CAP Part #</th><th data-k="3">Description</th><th data-k="4">Vel</th>
-<th data-k="5">Vendor</th><th data-k="6">Type</th><th data-k="7" class="num">Demand/day</th>
-<th data-k="8" class="num">Target days</th><th data-k="9" class="num">Target</th>
-<th data-k="10" class="num">Position</th><th data-k="11" class="num">Buy</th>
+<th data-k="5">Vendor</th><th data-k="6">Type</th><th data-k="7" class="num" title="Recency-weighted, seasonally adjusted units per selling day">Dem/day</th>
+<th data-k="8" class="num" title="Coverage days: lead time + A-item safety">Tgt days</th><th data-k="9" class="num" title="Target inventory = demand/day x target days">Target</th>
+<th data-k="10" class="num" title="On hand + on dock + in transit + on order">Pos'n</th><th data-k="11" class="num">Buy</th>
 <th data-k="14" class="num" title="15MP onhand + intransit for this SKU (Northeast only), netted across warehouses - highest demand claims first. &#10003; = fully coverable by transfer; (n) = only n units claimable for this row. Sorts by claimable qty.">15MP avail</th>
 </tr></thead><tbody></tbody></table>
 <div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
@@ -553,9 +567,11 @@ let av='',avt='';
 if(r[13]>=0){const avail=r[13],alloc=r[14],buy=r[11];
 av=avail.toLocaleString();
 if(alloc>=buy&&buy>0){av+=' <span class="ok">&#10003;</span>';avt=`15MP has ${avail}; ${alloc} claimable for this row - covers the full ${buy}-unit buy. Transfer instead of buying.`}
-else if(alloc>0){av+=` <span class="part">(${alloc})</span>`;avt=`15MP has ${avail}, but only ${alloc} is left for this row after higher-demand warehouses claim theirs. Partial transfer; still buy ${buy-alloc}.`}
+else if(alloc>0){av=alloc===avail?`<span class="part">${avail}</span>`:`${avail} <span class="part">(${alloc})</span>`;
+avt=alloc===avail?`15MP has ${avail} - all of it claimable here, but short of the ${buy}-unit buy. Transfer ${alloc}, still buy ${buy-alloc}.`
+:`15MP has ${avail}, but only ${alloc} is left for this row after higher-demand warehouses claim theirs. Partial transfer; still buy ${buy-alloc}.`}
 else if(avail>0){avt=`15MP has ${avail}, but it is fully claimed by higher-demand warehouses for this SKU. No transfer available - buy all ${buy}.`}}
-tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td>${r[3]}</td><td>${r[4]||''}</td><td>${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td><td class="num" title="${avt}">${av}</td>`;
+tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td title="${r[3]}">${r[3]}</td><td>${r[4]||''}</td><td title="${r[5]||''}">${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[8]}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td><td class="num" title="${avt}">${av}</td>`;
 tb.appendChild(tr)});
 $('count').textContent=view.length.toLocaleString()+' rows';
 $('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))}`}
