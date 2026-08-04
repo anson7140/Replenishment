@@ -454,8 +454,8 @@ button{padding:6px 12px;border:1px solid var(--line);border-radius:8px;backgroun
 <div class="ctrlbar"><span class="seg" id="rseg"></span></div>
 __WARNS__
 <div class="cards">
-<div class="card"><div class="v" id="cSku"></div><div class="l">SKU-locations to buy</div></div>
-<div class="card"><div class="v" id="cUnits"></div><div class="l">Total buy units</div></div>
+<div class="card"><div class="v" id="cSku"></div><div class="l" id="lblSku">SKU-locations to buy</div></div>
+<div class="card"><div class="v" id="cUnits"></div><div class="l" id="lblUnits">Total buy units</div></div>
 <div class="card"><div class="v" id="cOs"></div><div class="l">Oversea vendor units</div></div>
 <div class="card"><div class="v" id="cDom"></div><div class="l">Domestic vendor units</div></div>
 </div>
@@ -463,7 +463,8 @@ __WARNS__
 <span class="lg"><i class="sw" style="background:var(--s1)"></i>Oversea</span>
 <span class="lg"><i class="sw" style="background:var(--s2)"></i>Domestic</span>
 <span class="lg" id="lgUn" hidden><i class="sw" style="background:var(--sx)"></i>Unassigned vendor</span>
-<span class="seg mlauto"><button id="mUnits" class="on">Units</button><button id="mCtn">Containers (1,300/ctn)</button></span>
+<span class="seg mlauto" id="netseg"><button id="mGross" class="on" title="Full buy quantity required by demand">Gross buy</button><button id="mNet" title="Buy quantity after transferring available 15MP stock (Northeast only)">Net of 15MP transfers</button></span>
+<span class="seg"><button id="mUnits" class="on">Units</button><button id="mCtn">Containers (1,300/ctn)</button></span>
 </div>
 <div class="grid2">
 <div class="panel"><h2 id="vh">Top vendors</h2><div id="vchart"></div></div>
@@ -572,11 +573,16 @@ const reg=(REGION||'all-regions').toLowerCase().replace(/\s+/g,'-');
 a.download='buy_list_'+document.title.split(' - ')[1]+'_'+reg+'_'+(view.length===RDATA().length?'all':'filtered')+'.csv';
 a.click();URL.revokeObjectURL(a.href)};
 
+// ---- gross vs net-of-15MP-transfers ----
+let netMode=false;
+// qty(row): gross buy, or buy minus what 15MP can actually cover for that row
+const qty=r=>netMode?r[11]-(r[14]>0?r[14]:0):r[11];
+
 // ---- summary cards (region-scoped) ----
 function renderCards(){const rows=RDATA();
 let u=0,os=0,dom=0;
-for(const r of rows){u+=r[11];if(r[6]==='Oversea')os+=r[11];else if(r[6]==='Domestic')dom+=r[11]}
-$('cSku').textContent=rows.length.toLocaleString();
+for(const r of rows){const q=qty(r);u+=q;if(r[6]==='Oversea')os+=q;else if(r[6]==='Domestic')dom+=q}
+$('cSku').textContent=(netMode?rows.filter(r=>qty(r)>0).length:rows.length).toLocaleString();
 $('cUnits').textContent=u.toLocaleString();
 $('cOs').textContent=os.toLocaleString();
 $('cDom').textContent=dom.toLocaleString()}
@@ -591,12 +597,12 @@ const tip=$('tip');
 function tipMove(e){tip.style.left=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-8)+'px';tip.style.top=Math.min(e.clientY+14,innerHeight-tip.offsetHeight-8)+'px'}
 function hoverize(el,html){el.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.display='block';tipMove(e)});el.addEventListener('mouseleave',()=>tip.style.display='none')}
 function vendAgg(){const m=new Map();
-for(const r of RDATA()){const k=(r[5]||'(none)')+'|'+(r[6]||'');m.set(k,(m.get(k)||0)+r[11])}
+for(const r of RDATA()){const q=qty(r);if(!q)continue;const k=(r[5]||'(none)')+'|'+(r[6]||'');m.set(k,(m.get(k)||0)+q)}
 return[...m.entries()].map(([k,v])=>{const[nm,t]=k.split('|');return[nm,t,v]}).sort((a,b)=>b[2]-a[2])}
 function whAgg(){const m=new Map();
-for(const r of RDATA()){if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
-if(r[6]==='Oversea')a[0]+=r[11];else if(r[6]==='Domestic')a[1]+=r[11];else a[2]+=r[11]}
-return[...m.entries()].map(([w,a])=>[w,...a]).sort((a,b)=>(b[1]+b[2]+b[3])-(a[1]+a[2]+a[3]))}
+for(const r of RDATA()){const q=qty(r);if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
+if(r[6]==='Oversea')a[0]+=q;else if(r[6]==='Domestic')a[1]+=q;else a[2]+=q}
+return[...m.entries()].map(([w,a])=>[w,...a]).filter(r=>r[1]+r[2]+r[3]>0).sort((a,b)=>(b[1]+b[2]+b[3])-(a[1]+a[2]+a[3]))}
 function renderVend(){
 const el=$('vchart');el.innerHTML='';
 const VDATA=vendAgg();if(!VDATA.length)return;
@@ -626,11 +632,17 @@ row.innerHTML=`<span class="nm">${wh}</span><span class="track">${segs.map((s,i)
 row.querySelectorAll('.bseg').forEach((sg,i)=>hoverize(sg,`<b>${wh}</b><br>${segs[i][0]}: ${both(segs[i][1])}<br>Total: ${both(tot)}`));
 el.appendChild(row);}}
 function renderCharts(){renderVend();renderWh();
-$('vh').textContent='Top vendors — '+(mode==='units'?'buy units':'containers (1,300 units each)');
-$('whh').textContent=(mode==='units'?'Buy units':'Containers')+' by warehouse';
-$('mUnits').classList.toggle('on',mode==='units');$('mCtn').classList.toggle('on',mode!=='units')}
+const suffix=netMode?' — net of 15MP transfers':'';
+$('vh').textContent='Top vendors — '+(mode==='units'?'buy units':'containers (1,300 units each)')+suffix;
+$('whh').textContent=(mode==='units'?'Buy units':'Containers')+' by warehouse'+suffix;
+$('mUnits').classList.toggle('on',mode==='units');$('mCtn').classList.toggle('on',mode!=='units');
+$('mGross').classList.toggle('on',!netMode);$('mNet').classList.toggle('on',netMode);
+$('lblUnits').textContent=netMode?'Net buy units (after 15MP transfers)':'Total buy units';
+$('lblSku').textContent=netMode?'SKU-locations still to buy':'SKU-locations to buy'}
 $('mUnits').onclick=()=>{mode='units';renderCharts()};
 $('mCtn').onclick=()=>{mode='ctn';renderCharts()};
+$('mGross').onclick=()=>{netMode=false;renderCards();renderCharts()};
+$('mNet').onclick=()=>{netMode=true;renderCards();renderCharts()};
 refreshFilters();apply();renderCards();renderCharts();
 </script></body></html>
 """
