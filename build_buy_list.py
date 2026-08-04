@@ -270,11 +270,11 @@ def compute(df, vtype):
     df["Velocity"] = df["Velocity"].fillna("D")
 
     # --- coverage target ----------------------------------------------------
-    # Safety stock follows the export's companywide velocity (one letter per
-    # item), not the per-warehouse revenue banding: an item KSI treats as an
-    # A part gets the buffer at every location it stocks.
+    # Safety stock follows the COMPUTED per-warehouse velocity (cumulative
+    # revenue banding), so the buffer lands only where a SKU actually earns
+    # A-class volume at that warehouse.
     oversea = df["Vendor Type"] == "Oversea"
-    is_a = df["Final Velocity"].fillna("") == "A"
+    is_a = df["Velocity"] == "A"
 
     df["Lead Days"] = np.where(oversea, OVERSEA_DAYS, DOMESTIC_DAYS)
     df["Safety Days"] = np.where(
@@ -400,8 +400,8 @@ def write_excel(df, buys, warns, out_path):
         "Northeast YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw. Florida ADU as provided in FL Raw (source-computed daily rate).",
         "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units. FL Raw carries no LY columns, so Florida's index is 1.0.",
         "Location = physical stocking location. Warehouse = true warehouse after rollup: 07BK rolls into 01NJ and 13PA into 15MP; all other locations stand alone. Velocity, the warehouse slicer, and the warehouse chart all use the rolled-up Warehouse.",
-        f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity is the per-warehouse revenue ranking used for reporting and slicing; the A-item safety stock follows Source Velocity (companywide) instead.",
-        "Coverage: Oversea primary = 100 days; Domestic = 14 days. Safety stock (+21 days oversea / +7 domestic) is applied to items whose SOURCE VELOCITY is A - the export's companywide letter, one per item - so an A part is buffered at every location it stocks. Days = selling days, same basis as ADU.",
+        f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock. The export's companywide letter is kept as Source Velocity for reference only - it is one value per item, identical at every warehouse.",
+        "Coverage: Oversea primary = 100 days; Domestic = 14 days. Safety stock (+21 days oversea / +7 domestic) is applied to items whose COMPUTED per-warehouse Velocity is A, so the buffer lands only where the SKU earns A-class revenue at that warehouse. Days = selling days, same basis as ADU.",
         "Hub Avail = combined onhand + intransit at the 01NJ and 15MP hubs for that SKU, shown on every other Northeast location's rows. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
