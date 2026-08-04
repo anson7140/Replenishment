@@ -69,12 +69,14 @@ check("R5a: oversea lead days = 100", (os_rows["Lead Days"] == 100).all())
 check("R5b: domestic lead days = 14", (do_rows["Lead Days"] == 14).all())
 
 # R6: safety stock - A items +21 oversea / +7 domestic, others 0
-a_os = out[(out["Velocity"] == "A") & (out["Vendor Type"] == "Oversea")]
-a_do = out[(out["Velocity"] == "A") & (out["Vendor Type"] == "Domestic")]
-non_a = out[out["Velocity"] != "A"]
-check("R6a: A-item oversea safety = 21 days", (a_os["Safety Days"] == 21).all())
-check("R6b: A-item domestic safety = 7 days", (a_do["Safety Days"] == 7).all())
-check("R6c: non-A safety = 0 days", (non_a["Safety Days"] == 0).all())
+# safety follows the export's companywide Source Velocity, not the
+# per-warehouse revenue banding
+a_os = out[(out["Source Velocity"] == "A") & (out["Vendor Type"] == "Oversea")]
+a_do = out[(out["Source Velocity"] == "A") & (out["Vendor Type"] == "Domestic")]
+non_a = out[out["Source Velocity"] != "A"]
+check("R6a: source-A oversea safety = 21 days", (a_os["Safety Days"] == 21).all())
+check("R6b: source-A domestic safety = 7 days", (a_do["Safety Days"] == 7).all())
+check("R6c: non-source-A safety = 0 days", (non_a["Safety Days"] == 0).all())
 
 # R7: no patented items, no companywide P-velocity items
 pat_item = master.drop_duplicates("ItemNo").set_index("ItemNo")["Patent"]
