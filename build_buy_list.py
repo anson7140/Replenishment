@@ -349,10 +349,10 @@ def data_quality_warnings(df):
 
 
 def display_frame(x):
-    """Output naming: DC = physical location, Warehouse = grouped (feeders
-    roll into their hub), Source Velocity = the export's own velocity."""
+    """Output naming: Location = physical stocking location, Warehouse = true
+    warehouse after rollup, Source Velocity = the export's own velocity."""
     attrs = dict(x.attrs)
-    x = x.rename(columns={"Warehouse": "DC",
+    x = x.rename(columns={"Warehouse": "Location",
                           "Final Velocity": "Source Velocity"})
     x["Warehouse"] = x["WH Group"]
     x.attrs = attrs
@@ -365,7 +365,7 @@ def write_excel(df, buys, warns, out_path):
 
     df, buys = display_frame(df), display_frame(buys)
 
-    cols = ["Region", "DC", "Warehouse", "ItemNo", "CAP_ItemNum",
+    cols = ["Region", "Location", "Warehouse", "ItemNo", "CAP_ItemNum",
             "Product Desc", "Model", "Velocity", "Source Velocity",
             "Primary Vendor", "Vendor Type", "Secondary Vendor", "ADU",
             "Rolling Avg 35 ADU", "Seasonal Index", "Demand ADU", "Lead Days",
@@ -379,7 +379,7 @@ def write_excel(df, buys, warns, out_path):
                      Unique_SKUs=("ItemNo", "nunique"),
                      Buy_Units=("Buy Qty", "sum"))
                 .reset_index().sort_values("Buy_Units", ascending=False))
-    wh_sum = (buys.groupby(["Region", "Warehouse", "DC"])
+    wh_sum = (buys.groupby(["Region", "Warehouse", "Location"])
               .agg(SKU_Locations=("ItemNo", "size"),
                    Buy_Units=("Buy Qty", "sum"),
                    Net_Buy_Units=("Net Buy Qty", "sum"))
@@ -396,10 +396,10 @@ def write_excel(df, buys, warns, out_path):
         *(f"[{r}] Demand basis: {m}." for r, m in modes.items()),
         "Northeast YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw. Florida ADU as provided in FL Raw (source-computed daily rate).",
         "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units. FL Raw carries no LY columns, so Florida's index is 1.0.",
-        "DC = physical location. Warehouse = grouped location: 07BK rolls into 01NJ and 13PA into 15MP; all other DCs stand alone.",
+        "Location = physical stocking location. Warehouse = true warehouse after rollup: 07BK rolls into 01NJ and 13PA into 15MP; all other locations stand alone. Velocity, the warehouse slicer, and the warehouse chart all use the rolled-up Warehouse.",
         f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock; the export's own value is kept as Source Velocity for reference.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. A items add 21 safety days (oversea) / 7 (domestic). Days = selling days, same basis as ADU.",
-        "Hub Avail = combined onhand + intransit at the 01NJ and 15MP hubs for that SKU, shown on every other Northeast DC's rows. Hub Alloc nets that pool across DCs (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
+        "Hub Avail = combined onhand + intransit at the 01NJ and 15MP hubs for that SKU, shown on every other Northeast location's rows. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
         "Excluded: patented items and companywide P-velocity items per KSI_Item_master (Florida also honors its export's own Patented flag).",
@@ -451,7 +451,7 @@ def write_html(buys, warns, run_date, out_path):
     vend2, i_vend2 = intern(b["Secondary Vendor"])
 
     rows = list(zip(
-        b["DC"], b["Warehouse"], b["ItemNo"], b["CAP_ItemNum"].fillna(""),
+        b["Location"], b["Warehouse"], b["ItemNo"], b["CAP_ItemNum"].fillna(""),
         i_desc, i_model, b["Velocity"], b["Source Velocity"].fillna(""),
         i_vend, i_type, i_vend2,
         b["ADU"].round(4), b["Rolling Avg 35 ADU"].round(4),
@@ -574,8 +574,8 @@ const DATA=__DATA__,L=__LUTS__;
 // column map: i=field index, t=title, n=numeric, f=formatter
 const S=v=>v, LU=k=>(v=>L[k][v]||'');
 const COLS=[
-{h:'DC',i:0,w:48,k:1,t:'Physical location'},
-{h:'Warehouse',i:1,w:76,k:1,t:'Grouped location: 07BK rolls into 01NJ, 13PA into 15MP'},
+{h:'Location',i:0,w:60,k:1,t:'Physical stocking location'},
+{h:'Warehouse',i:1,w:76,k:1,t:'True warehouse after rollup: 07BK into 01NJ, 13PA into 15MP'},
 {h:'SKU',i:2,w:76,k:1},
 {h:'CAP Part #',i:3,w:78,k:1},
 {h:'Description',i:4,f:LU('desc'),w:200,k:1},
@@ -661,11 +661,11 @@ const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
 $('cAll').classList.toggle('on',allCols);$('cKey').classList.toggle('on',!allCols)}
 
 function refreshFilters(){const rows=RDATA();
-MS.wh.setOptions([...new Set(rows.map(r=>r[0]))].sort());
+MS.wh.setOptions([...new Set(rows.map(r=>r[1]))].sort());   // true warehouse (post-rollup)
 MS.vt.setOptions([...new Set(rows.map(r=>r[9]).map(LU('type')).filter(Boolean))].sort());
 MS.vel.setOptions([...new Set(rows.map(r=>r[6]).filter(Boolean))].sort())}
 function apply(){const q=$('q').value.toLowerCase(),D=LU('desc'),V=LU('vend'),T=LU('type');
-view=RDATA().filter(r=>MS.wh.match(r[0])&&MS.vt.match(T(r[9]))&&MS.vel.match(r[6])
+view=RDATA().filter(r=>MS.wh.match(r[1])&&MS.vt.match(T(r[9]))&&MS.vel.match(r[6])
 &&(!q||(r[2]+' '+r[3]+' '+D(r[4])+' '+V(r[8])).toLowerCase().includes(q)));
 view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
 page=0;render()}
@@ -699,7 +699,7 @@ $('cKey').onclick=()=>{allCols=false;buildHead();render()};
 $('cAll').onclick=()=>{allCols=true;buildHead();render()};
 buildHead();
 $('csv').onclick=()=>{
-const hdr=['Region','DC','Warehouse','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
+const hdr=['Region','Location','Warehouse','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
 const D=LU('desc'),M=LU('model'),V=LU('vend'),T=LU('type'),V2=LU('vend2');
 const csv=[hdr.join(',')].concat(view.map(r=>[r[28],r[0],r[1],r[2],r[3],D(r[4]),M(r[5]),r[6],r[7],V(r[8]),T(r[9]),V2(r[10]),
@@ -739,7 +739,7 @@ function vendAgg(){const m=new Map();
 for(const r of RDATA()){const q=qty(r);if(!q)continue;const k=(L.vend[r[8]]||'(none)')+'|'+vtype(r);m.set(k,(m.get(k)||0)+q)}
 return[...m.entries()].map(([k,v])=>{const[nm,t]=k.split('|');return[nm,t,v]}).sort((a,b)=>b[2]-a[2])}
 function whAgg(){const m=new Map();
-for(const r of RDATA()){const q=qty(r),t=vtype(r);if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
+for(const r of RDATA()){const q=qty(r),t=vtype(r);if(!m.has(r[1]))m.set(r[1],[0,0,0]);const a=m.get(r[1]);
 if(t==='Oversea')a[0]+=q;else if(t==='Domestic')a[1]+=q;else a[2]+=q}
 return[...m.entries()].map(([w,a])=>[w,...a]).filter(r=>r[1]+r[2]+r[3]>0).sort((a,b)=>(b[1]+b[2]+b[3])-(a[1]+a[2]+a[3]))}
 function renderVend(){

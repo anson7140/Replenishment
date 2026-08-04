@@ -32,12 +32,12 @@ def check(name, cond):
     print(f"PASS  {name}")
 
 # R1: SKU data is location-level and sourced from the regional raw exports
-check("R1a: buy list rows are (Region, DC, ItemNo) location-level",
-      {"Region", "DC", "Warehouse", "ItemNo"} <= set(out.columns) and len(out) > 0)
+check("R1a: buy list rows are (Region, Location, ItemNo) location-level",
+      {"Region", "Location", "Warehouse", "ItemNo"} <= set(out.columns) and len(out) > 0)
 model_keys = set(zip(df["Region"], df["Warehouse"], df["ItemNo"]))
 check("R1b: every buy-list row exists in a regional raw export",
       all(k in model_keys
-          for k in zip(out["Region"], out["DC"], out["ItemNo"])))
+          for k in zip(out["Region"], out["Location"], out["ItemNo"])))
 
 # R2: daily usage shown per SKU-location
 check("R2: daily usage (ADU and Demand ADU) present on every row",
@@ -116,11 +116,11 @@ check("R10b: Northeast uses the recency blend (fixed 35-day column)",
 
 # R11: warehouse grouping - feeders roll into their hub, others unchanged
 check("R11a: 07BK rolls into 01NJ and 13PA into 15MP",
-      (out.loc[out["DC"] == "07BK", "Warehouse"] == "01NJ").all()
-      and (out.loc[out["DC"] == "13PA", "Warehouse"] == "15MP").all())
-check("R11b: every other DC groups to itself",
-      (out.loc[~out["DC"].isin(["07BK", "13PA"]), "Warehouse"]
-       == out.loc[~out["DC"].isin(["07BK", "13PA"]), "DC"]).all())
+      (out.loc[out["Location"] == "07BK", "Warehouse"] == "01NJ").all()
+      and (out.loc[out["Location"] == "13PA", "Warehouse"] == "15MP").all())
+check("R11b: every other location groups to itself",
+      (out.loc[~out["Location"].isin(["07BK", "13PA"]), "Warehouse"]
+       == out.loc[~out["Location"].isin(["07BK", "13PA"]), "Location"]).all())
 
 # R12: velocity = cumulative revenue share within Region + Warehouse group.
 # Ranking ties make the exact A/B split at a boundary arbitrary, so verify the

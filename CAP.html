@@ -93,8 +93,8 @@ const DATA=[["01NJ", "01NJ", "7152353", "2139.1370", 0, 0, "A", "A", 0, 0, 0, 0.
 // column map: i=field index, t=title, n=numeric, f=formatter
 const S=v=>v, LU=k=>(v=>L[k][v]||'');
 const COLS=[
-{h:'DC',i:0,w:48,k:1,t:'Physical location'},
-{h:'Warehouse',i:1,w:76,k:1,t:'Grouped location: 07BK rolls into 01NJ, 13PA into 15MP'},
+{h:'Location',i:0,w:60,k:1,t:'Physical stocking location'},
+{h:'Warehouse',i:1,w:76,k:1,t:'True warehouse after rollup: 07BK into 01NJ, 13PA into 15MP'},
 {h:'SKU',i:2,w:76,k:1},
 {h:'CAP Part #',i:3,w:78,k:1},
 {h:'Description',i:4,f:LU('desc'),w:200,k:1},
@@ -180,11 +180,11 @@ const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
 $('cAll').classList.toggle('on',allCols);$('cKey').classList.toggle('on',!allCols)}
 
 function refreshFilters(){const rows=RDATA();
-MS.wh.setOptions([...new Set(rows.map(r=>r[0]))].sort());
+MS.wh.setOptions([...new Set(rows.map(r=>r[1]))].sort());   // true warehouse (post-rollup)
 MS.vt.setOptions([...new Set(rows.map(r=>r[9]).map(LU('type')).filter(Boolean))].sort());
 MS.vel.setOptions([...new Set(rows.map(r=>r[6]).filter(Boolean))].sort())}
 function apply(){const q=$('q').value.toLowerCase(),D=LU('desc'),V=LU('vend'),T=LU('type');
-view=RDATA().filter(r=>MS.wh.match(r[0])&&MS.vt.match(T(r[9]))&&MS.vel.match(r[6])
+view=RDATA().filter(r=>MS.wh.match(r[1])&&MS.vt.match(T(r[9]))&&MS.vel.match(r[6])
 &&(!q||(r[2]+' '+r[3]+' '+D(r[4])+' '+V(r[8])).toLowerCase().includes(q)));
 view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
 page=0;render()}
@@ -218,7 +218,7 @@ $('cKey').onclick=()=>{allCols=false;buildHead();render()};
 $('cAll').onclick=()=>{allCols=true;buildHead();render()};
 buildHead();
 $('csv').onclick=()=>{
-const hdr=['Region','DC','Warehouse','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
+const hdr=['Region','Location','Warehouse','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
 const D=LU('desc'),M=LU('model'),V=LU('vend'),T=LU('type'),V2=LU('vend2');
 const csv=[hdr.join(',')].concat(view.map(r=>[r[28],r[0],r[1],r[2],r[3],D(r[4]),M(r[5]),r[6],r[7],V(r[8]),T(r[9]),V2(r[10]),
@@ -258,7 +258,7 @@ function vendAgg(){const m=new Map();
 for(const r of RDATA()){const q=qty(r);if(!q)continue;const k=(L.vend[r[8]]||'(none)')+'|'+vtype(r);m.set(k,(m.get(k)||0)+q)}
 return[...m.entries()].map(([k,v])=>{const[nm,t]=k.split('|');return[nm,t,v]}).sort((a,b)=>b[2]-a[2])}
 function whAgg(){const m=new Map();
-for(const r of RDATA()){const q=qty(r),t=vtype(r);if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
+for(const r of RDATA()){const q=qty(r),t=vtype(r);if(!m.has(r[1]))m.set(r[1],[0,0,0]);const a=m.get(r[1]);
 if(t==='Oversea')a[0]+=q;else if(t==='Domestic')a[1]+=q;else a[2]+=q}
 return[...m.entries()].map(([w,a])=>[w,...a]).filter(r=>r[1]+r[2]+r[3]>0).sort((a,b)=>(b[1]+b[2]+b[3])-(a[1]+a[2]+a[3]))}
 function renderVend(){
