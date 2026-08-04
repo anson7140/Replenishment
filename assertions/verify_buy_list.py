@@ -32,12 +32,12 @@ def check(name, cond):
     print(f"PASS  {name}")
 
 # R1: SKU data is location-level and sourced from the regional raw exports
-check("R1a: buy list rows are (Region, Warehouse, ItemNo) location-level",
-      {"Region", "Warehouse", "ItemNo"} <= set(out.columns) and len(out) > 0)
+check("R1a: buy list rows are (Region, DC, ItemNo) location-level",
+      {"Region", "DC", "Warehouse", "ItemNo"} <= set(out.columns) and len(out) > 0)
 model_keys = set(zip(df["Region"], df["Warehouse"], df["ItemNo"]))
 check("R1b: every buy-list row exists in a regional raw export",
       all(k in model_keys
-          for k in zip(out["Region"], out["Warehouse"], out["ItemNo"])))
+          for k in zip(out["Region"], out["DC"], out["ItemNo"])))
 
 # R2: daily usage shown per SKU-location
 check("R2: daily usage (ADU and Demand ADU) present on every row",
@@ -69,9 +69,9 @@ check("R5a: oversea lead days = 100", (os_rows["Lead Days"] == 100).all())
 check("R5b: domestic lead days = 14", (do_rows["Lead Days"] == 14).all())
 
 # R6: safety stock - A items +21 oversea / +7 domestic, others 0
-a_os = out[(out["Final Velocity"] == "A") & (out["Vendor Type"] == "Oversea")]
-a_do = out[(out["Final Velocity"] == "A") & (out["Vendor Type"] == "Domestic")]
-non_a = out[out["Final Velocity"] != "A"]
+a_os = out[(out["Velocity"] == "A") & (out["Vendor Type"] == "Oversea")]
+a_do = out[(out["Velocity"] == "A") & (out["Vendor Type"] == "Domestic")]
+non_a = out[out["Velocity"] != "A"]
 check("R6a: A-item oversea safety = 21 days", (a_os["Safety Days"] == 21).all())
 check("R6b: A-item domestic safety = 7 days", (a_do["Safety Days"] == 7).all())
 check("R6c: non-A safety = 0 days", (non_a["Safety Days"] == 0).all())
@@ -113,5 +113,67 @@ check("R10a: Florida uses the recency blend (true 35-day daily rate)",
       "Florida" not in modes or modes["Florida"].startswith("blend"))
 check("R10b: Northeast uses the recency blend (fixed 35-day column)",
       modes["Northeast"].startswith("blend"))
+
+# R11: warehouse grouping - feeders roll into their hub, others unchanged
+check("R11a: 07BK rolls into 01NJ and 13PA into 15MP",
+      (out.loc[out["DC"] == "07BK", "Warehouse"] == "01NJ").all()
+      and (out.loc[out["DC"] == "13PA", "Warehouse"] == "15MP").all())
+check("R11b: every other DC groups to itself",
+      (out.loc[~out["DC"].isin(["07BK", "13PA"]), "Warehouse"]
+       == out.loc[~out["DC"].isin(["07BK", "13PA"]), "DC"]).all())
+
+# R12: velocity = cumulative revenue share within Region + Warehouse group.
+# Ranking ties make the exact A/B split at a boundary arbitrary, so verify the
+# two properties that must hold regardless of tie order: bands are monotone in
+# revenue, and each band's cumulative revenue stays inside its ceiling.
+RANK = {"A": 0, "B": 1, "C": 2, "D": 3}
+mono_ok, band_ok, bad = True, True, []
+for (reg, wg), g in df.groupby(["Region", "WH Group"]):
+    it = (g.groupby("ItemNo").agg(rev=("Revenue", "sum"),
+                                  vel=("Velocity", "first")))
+    it["rev"] = it["rev"].clip(lower=0)   # net returns cannot rank
+    it = it.sort_values("rev", ascending=False)
+    tot = it["rev"].sum()
+    if tot <= 0:
+        continue
+    # Tie-tolerant monotonicity: the cheapest item in a band may equal (never
+    # undercut) the priciest item in the next band down.
+    lo = it.groupby("vel")["rev"].min()
+    hi = it.groupby("vel")["rev"].max()
+    for a, c in (("A", "B"), ("B", "C"), ("C", "D")):
+        if a in lo.index and c in hi.index and lo[a] < hi[c] - 1e-9:
+            mono_ok = False
+            bad.append(("monotonic", reg, wg, a, c, lo[a], hi[c]))
+    for band, ceil_ in (("A", b.VEL_A), ("B", b.VEL_B), ("C", b.VEL_C)):
+        cum = it.loc[it["vel"].map(RANK) <= RANK[band], "rev"].sum() / tot
+        if cum > ceil_ + 1e-9:
+            band_ok = False
+            bad.append((f"{band} ceiling", reg, wg, round(cum, 4)))
+check(f"R12a: velocity bands are monotone in revenue{'' if mono_ok else f' {bad[:3]}'}",
+      mono_ok)
+check(f"R12b: cumulative revenue per band within its ceiling "
+      f"(A<={b.VEL_A:.0%}, B<={b.VEL_B:.0%}, C<={b.VEL_C:.0%})"
+      f"{'' if band_ok else f' {bad[:3]}'}", band_ok)
+check("R12c: zero- and negative-revenue items are classified D",
+      (df.loc[df.groupby(["Region", "WH Group", "ItemNo"])["Revenue"]
+              .transform("sum") <= 0, "Velocity"] == "D").all())
+
+# R13: hub pooling and netted allocation
+hub_rows = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(b.HUBS))]
+pool = (hub_rows["Location_Onhand"]
+        + hub_rows["Location_InTransit"]).groupby(hub_rows["ItemNo"]).sum()
+ne_other = df[(df["Region"] == "Northeast")
+              & (~df["Warehouse"].isin(b.HUBS))]
+check("R13a: Hub Avail = combined 01NJ + 15MP onhand + intransit",
+      (ne_other["Hub Avail"].fillna(0)
+       == ne_other["ItemNo"].map(pool).fillna(0)).all())
+alloc_by_item = ne_other.groupby("ItemNo")["Hub Alloc"].sum()
+check("R13b: allocation never exceeds the hub pool for any SKU",
+      (alloc_by_item <= alloc_by_item.index.map(pool).fillna(0) + 1e-6).all())
+check("R13c: hub rows themselves carry no hub availability",
+      df.loc[df["Warehouse"].isin(b.HUBS), "Hub Avail"].isna().all())
+check("R13d: Net Buy Qty = Buy Qty - Hub Alloc (floored at 0)",
+      (out["Net Buy Qty"] == (out["Buy Qty"]
+       - out["Hub Alloc"].fillna(0)).clip(lower=0)).all())
 
 print(f"\n{passed} assertions passed.")

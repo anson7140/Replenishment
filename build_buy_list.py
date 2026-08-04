@@ -66,6 +66,15 @@ VENDOR_CSV = os.path.join(HERE, "Vendor and Type.csv")
 
 CAP_WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"]
 
+# Northeast overflow hubs: their combined onhand+intransit can cover buys at
+# any other NE DC (netted across DCs - one unit serves one location).
+HUBS = ["01NJ", "15MP"]
+# Feeder DC -> hub it rolls up into, for the grouped "Warehouse" column.
+WH_GROUP = {"07BK": "01NJ", "13PA": "15MP"}
+
+# Velocity: cumulative share of revenue within each warehouse group.
+VEL_A, VEL_B, VEL_C = 0.60, 0.80, 0.95   # A top 60%, B next 20, C next 15, D last 5
+
 SELLING_DAYS_YTD = 149          # Jan 1 - Jul 31 2026 selling days (Volume/ADU in export)
 CAL_DAYS_SAME = 212             # calendar days Jan 1 - Jul 31
 CAL_DAYS_REMAIN = 153           # calendar days Aug 1 - Dec 31
@@ -237,9 +246,32 @@ def compute(df, vtype):
     df["Demand ADU"] = (df["_base"] * df["Seasonal Index"]).round(5)
     df = df.drop(columns="_base")
 
+    # --- warehouse grouping: feeder DCs roll up into their hub --------------
+    df["WH Group"] = df["Warehouse"].replace(WH_GROUP)
+
+    # --- velocity: ABC/D by cumulative revenue share within each warehouse
+    # group (A = top 60% of revenue, B = next 20%, C = next 15%, D = last 5%).
+    # Net returns can make an item's revenue negative; those cannot contribute
+    # to a "top X% of revenue" ranking, so rank on revenue floored at zero and
+    # classify non-positive items as D.
+    rev = (df.groupby(["Region", "WH Group", "ItemNo"], sort=False)["Revenue"]
+           .sum().reset_index())
+    rev["_r"] = rev["Revenue"].clip(lower=0)
+    rev = rev.sort_values(["Region", "WH Group", "_r"],
+                          ascending=[True, True, False])
+    g = rev.groupby(["Region", "WH Group"], sort=False)["_r"]
+    tot = g.transform("sum")
+    share = np.where(tot > 0, g.cumsum() / tot.replace(0, np.nan), 1.0)
+    rev["Velocity"] = np.select(
+        [rev["_r"] <= 0, share <= VEL_A, share <= VEL_B, share <= VEL_C],
+        ["D", "A", "B", "C"], default="D")
+    df = df.merge(rev[["Region", "WH Group", "ItemNo", "Velocity"]],
+                  on=["Region", "WH Group", "ItemNo"], how="left")
+    df["Velocity"] = df["Velocity"].fillna("D")
+
     # --- coverage target ----------------------------------------------------
     oversea = df["Vendor Type"] == "Oversea"
-    is_a = df["Final Velocity"].fillna("") == "A"
+    is_a = df["Velocity"] == "A"
 
     df["Lead Days"] = np.where(oversea, OVERSEA_DAYS, DOMESTIC_DAYS)
     df["Safety Days"] = np.where(
@@ -254,31 +286,33 @@ def compute(df, vtype):
     ).astype(int)
     df["Buy Qty"] = (df["Target Qty"] - df["Position"]).clip(lower=0).astype(int)
 
-    # 15MP is the NE overflow hub. Expose its onhand+intransit per SKU on the
-    # other NE warehouses' rows, then NET it across those rows: one unit at
-    # 15MP can only cover one warehouse, so allocate highest-demand first.
-    hub = df[(df["Region"] == "Northeast") & (df["Warehouse"] == "15MP")]
-    avail15 = (hub["Location_Onhand"] + hub["Location_InTransit"]).groupby(
+    # 15MP and 01NJ are the NE overflow hubs. Pool their onhand+intransit per
+    # SKU and expose it on every other NE row, then NET it across those rows:
+    # a unit can only cover one warehouse, so allocate highest-demand first.
+    hub = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(HUBS))]
+    hub_avail = (hub["Location_Onhand"] + hub["Location_InTransit"]).groupby(
         hub["ItemNo"]).sum()
-    is_ne_other = (df["Region"] == "Northeast") & (df["Warehouse"] != "15MP")
-    df["15MP Avail"] = np.where(is_ne_other,
-                               df["ItemNo"].map(avail15).fillna(0), np.nan)
+    is_ne_other = (df["Region"] == "Northeast") & (~df["Warehouse"].isin(HUBS))
+    df["Hub Avail"] = np.where(is_ne_other,
+                               df["ItemNo"].map(hub_avail).fillna(0), np.nan)
 
-    df["15MP Alloc"] = np.where(is_ne_other, 0.0, np.nan)
+    df["Hub Alloc"] = np.where(is_ne_other, 0.0, np.nan)
     cand = df[is_ne_other & (df["Buy Qty"] > 0)
-              & (df["15MP Avail"] > 0)].sort_values(
+              & (df["Hub Avail"] > 0)].sort_values(
         ["ItemNo", "Demand ADU"], ascending=[True, False])
     alloc = {}
     remaining = {}
     for idx, item, need, avail in zip(cand.index, cand["ItemNo"],
-                                      cand["Buy Qty"], cand["15MP Avail"]):
+                                      cand["Buy Qty"], cand["Hub Avail"]):
         left = remaining.get(item, avail)
         take = min(left, need)
         if take > 0:
             alloc[idx] = take
             remaining[item] = left - take
     if alloc:
-        df.loc[list(alloc), "15MP Alloc"] = list(alloc.values())
+        df.loc[list(alloc), "Hub Alloc"] = list(alloc.values())
+    df["Net Buy Qty"] = (df["Buy Qty"]
+                         - df["Hub Alloc"].fillna(0)).clip(lower=0).astype(int)
 
     df.attrs["demand_modes"] = modes
     return df
@@ -314,28 +348,47 @@ def data_quality_warnings(df):
     return warns
 
 
+def display_frame(x):
+    """Output naming: DC = physical location, Warehouse = grouped (feeders
+    roll into their hub), Source Velocity = the export's own velocity."""
+    attrs = dict(x.attrs)
+    x = x.rename(columns={"Warehouse": "DC",
+                          "Final Velocity": "Source Velocity"})
+    x["Warehouse"] = x["WH Group"]
+    x.attrs = attrs
+    return x
+
+
 def write_excel(df, buys, warns, out_path):
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
-    cols = ["Region", "Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
-            "Model", "Final Velocity", "Primary Vendor", "Vendor Type",
-            "Secondary Vendor", "ADU", "Seasonal Index", "Demand ADU",
-            "Lead Days", "Safety Days", "Target Days", "Target Qty",
-            "Location_Onhand", "Location_OnOnDock", "Location_InTransit",
-            "Location_OnOrder", "Position", "Buy Qty", "15MP Avail",
-            "15MP Alloc", "Volume", "PY Volume", "Volume_Prior Year",
-            "Rolling Avg 35 ADU"]
+    df, buys = display_frame(df), display_frame(buys)
+
+    cols = ["Region", "DC", "Warehouse", "ItemNo", "CAP_ItemNum",
+            "Product Desc", "Model", "Velocity", "Source Velocity",
+            "Primary Vendor", "Vendor Type", "Secondary Vendor", "ADU",
+            "Rolling Avg 35 ADU", "Seasonal Index", "Demand ADU", "Lead Days",
+            "Safety Days", "Target Days", "Target Qty", "Location_Onhand",
+            "Location_OnOnDock", "Location_InTransit", "Location_OnOrder",
+            "Position", "Buy Qty", "Hub Avail", "Hub Alloc", "Net Buy Qty",
+            "Volume", "PY Volume", "Volume_Prior Year", "Revenue"]
 
     vend_sum = (buys.groupby(["Region", "Primary Vendor", "Vendor Type"], dropna=False)
                 .agg(SKU_Locations=("ItemNo", "size"),
                      Unique_SKUs=("ItemNo", "nunique"),
                      Buy_Units=("Buy Qty", "sum"))
                 .reset_index().sort_values("Buy_Units", ascending=False))
-    wh_sum = (buys.groupby(["Region", "Warehouse"])
+    wh_sum = (buys.groupby(["Region", "Warehouse", "DC"])
               .agg(SKU_Locations=("ItemNo", "size"),
-                   Buy_Units=("Buy Qty", "sum"))
+                   Buy_Units=("Buy Qty", "sum"),
+                   Net_Buy_Units=("Net Buy Qty", "sum"))
               .reset_index().sort_values("Buy_Units", ascending=False))
+    vel_sum = (buys.groupby(["Region", "Warehouse", "Velocity"])
+               .agg(SKU_Locations=("ItemNo", "size"),
+                    Revenue=("Revenue", "sum"),
+                    Buy_Units=("Buy Qty", "sum"))
+               .reset_index().sort_values(["Region", "Warehouse", "Velocity"]))
     exceptions = df[df["Vendor Missing"] & (df["Buy Qty"] > 0)][cols]
 
     modes = df.attrs.get("demand_modes", {})
@@ -343,7 +396,10 @@ def write_excel(df, buys, warns, out_path):
         *(f"[{r}] Demand basis: {m}." for r, m in modes.items()),
         "Northeast YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw. Florida ADU as provided in FL Raw (source-computed daily rate).",
         "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units. FL Raw carries no LY columns, so Florida's index is 1.0.",
+        "DC = physical location. Warehouse = grouped location: 07BK rolls into 01NJ and 13PA into 15MP; all other DCs stand alone.",
+        f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock; the export's own value is kept as Source Velocity for reference.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. A items add 21 safety days (oversea) / 7 (domestic). Days = selling days, same basis as ADU.",
+        "Hub Avail = combined onhand + intransit at the 01NJ and 15MP hubs for that SKU, shown on every other Northeast DC's rows. Hub Alloc nets that pool across DCs (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
         "Excluded: patented items and companywide P-velocity items per KSI_Item_master (Florida also honors its export's own Patented flag).",
@@ -356,6 +412,7 @@ def write_excel(df, buys, warns, out_path):
         buys[cols].to_excel(xw, sheet_name="Buy List", index=False)
         vend_sum.to_excel(xw, sheet_name="Vendor Summary", index=False)
         wh_sum.to_excel(xw, sheet_name="Warehouse Summary", index=False)
+        vel_sum.to_excel(xw, sheet_name="Velocity Summary", index=False)
         exceptions.to_excel(xw, sheet_name="Exceptions", index=False)
         assumptions.to_excel(xw, sheet_name="Assumptions", index=False)
 
@@ -378,19 +435,45 @@ def write_excel(df, buys, warns, out_path):
 def write_html(buys, warns, run_date, out_path):
     import json
 
-    tbl = buys[["Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
-                "Final Velocity", "Primary Vendor", "Vendor Type",
-                "Demand ADU", "Target Days", "Target Qty", "Position",
-                "Buy Qty", "Region"]].copy()
-    tbl["15MP Avail"] = buys["15MP Avail"].fillna(-1).astype(int)  # -1 = n/a
-    tbl["15MP Alloc"] = buys["15MP Alloc"].fillna(0).astype(int)
-    payload = json.dumps(tbl.values.tolist(), default=str)
+    b = display_frame(buys)
+
+    def intern(series):
+        """Repeated strings -> lookup table + indices (keeps the file small)."""
+        s = series.fillna("").astype(str)
+        vals = list(pd.unique(s))
+        lut = {v: i for i, v in enumerate(vals)}
+        return vals, s.map(lut).astype(int)
+
+    descs, i_desc = intern(b["Product Desc"])
+    models, i_model = intern(b["Model"])
+    vends, i_vend = intern(b["Primary Vendor"])
+    types, i_type = intern(b["Vendor Type"])
+    vend2, i_vend2 = intern(b["Secondary Vendor"])
+
+    rows = list(zip(
+        b["DC"], b["Warehouse"], b["ItemNo"], b["CAP_ItemNum"].fillna(""),
+        i_desc, i_model, b["Velocity"], b["Source Velocity"].fillna(""),
+        i_vend, i_type, i_vend2,
+        b["ADU"].round(4), b["Rolling Avg 35 ADU"].round(4),
+        b["Seasonal Index"], b["Demand ADU"].round(4),
+        b["Lead Days"].astype(int), b["Safety Days"].astype(int),
+        b["Target Days"].astype(int), b["Target Qty"].astype(int),
+        b["Location_Onhand"].astype(int), b["Location_OnOnDock"].astype(int),
+        b["Location_InTransit"].astype(int), b["Location_OnOrder"].astype(int),
+        b["Position"].astype(int), b["Buy Qty"].astype(int),
+        b["Hub Avail"].fillna(-1).astype(int),      # -1 = not applicable
+        b["Hub Alloc"].fillna(0).astype(int),
+        b["Net Buy Qty"].astype(int), b["Region"],
+    ))
+    payload = json.dumps([list(r) for r in rows], default=str)
+    luts = json.dumps({"desc": descs, "model": models, "vend": vends,
+                       "type": types, "vend2": vend2})
 
     warn_html = "".join(f'<div class="warn">&#9888;&#65039; {w}</div>' for w in warns)
 
     html = HTML_TEMPLATE
     for k, v in {"__DATE__": run_date, "__WARNS__": warn_html,
-                 "__DATA__": payload}.items():
+                 "__LUTS__": luts, "__DATA__": payload}.items():
         html = html.replace(k, v)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
@@ -414,19 +497,7 @@ h1{font-size:20px;margin:0 0 4px}.sub{color:var(--mut);margin-bottom:14px}
 table{border-collapse:collapse;width:100%;font-size:12px;table-layout:fixed}
 th,td{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 th{color:var(--mut);font-size:11px;cursor:pointer;user-select:none}
-#tbl th:nth-child(1),#tbl td:nth-child(1){width:52px}
-#tbl th:nth-child(2),#tbl td:nth-child(2){width:78px}
-#tbl th:nth-child(3),#tbl td:nth-child(3){width:82px}
-#tbl{min-width:850px}
-#tbl th:nth-child(4),#tbl td:nth-child(4){width:auto}
-#tbl th:nth-child(5),#tbl td:nth-child(5){width:34px}
-#tbl th:nth-child(6),#tbl td:nth-child(6){width:88px}
-#tbl th:nth-child(7),#tbl td:nth-child(7){width:64px}
-#tbl th:nth-child(8),#tbl td:nth-child(8){width:72px}
-#tbl th:nth-child(9),#tbl td:nth-child(9){width:56px}
-#tbl th:nth-child(10),#tbl td:nth-child(10){width:58px}
-#tbl th:nth-child(11),#tbl td:nth-child(11){width:52px}
-#tbl th:nth-child(12),#tbl td:nth-child(12){width:80px}
+/* column widths are set inline from the COLS map */
 .num{text-align:right;font-variant-numeric:tabular-nums}
 .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
 input,select{padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--ink)}
@@ -492,22 +563,50 @@ __WARNS__
 <span class="ms" id="msWh"></span>
 <span class="ms" id="msVt"></span>
 <span class="ms" id="msVel"></span>
-<button id="csv" title="Downloads the rows matching the current filters">&#11015; Export CSV (filtered)</button>
+<button id="csv" title="Downloads the rows matching the current filters - always all columns">&#11015; Export CSV (filtered)</button>
+<span class="seg mlauto"><button id="cKey" title="Just the decision columns - fits without scrolling">Key columns</button><button id="cAll" class="on" title="Every calculated column (scrolls sideways)">All columns</button></span>
 </div>
-<table id="tbl"><thead><tr>
-<th data-k="0">WH</th><th data-k="1">SKU</th><th data-k="2">CAP Part #</th><th data-k="3">Description</th><th data-k="4">Vel</th>
-<th data-k="5">Vendor</th><th data-k="6">Type</th><th data-k="7" class="num" title="Recency-weighted, seasonally adjusted units per selling day">Dem/day</th>
-<th data-k="9" class="num" title="Target inventory = demand/day x target days">Target</th>
-<th data-k="10" class="num" title="On hand + on dock + in transit + on order">Pos'n</th><th data-k="11" class="num">Buy</th>
-<th data-k="14" class="num" title="15MP onhand + intransit for this SKU (Northeast only), netted across warehouses - highest demand claims first. &#10003; = fully coverable by transfer; (n) = only n units claimable for this row. Sorts by claimable qty.">15MP avail</th>
-</tr></thead><tbody></tbody></table>
+<table id="tbl"><thead><tr id="thr"></tr></thead><tbody></tbody></table>
 <div class="pager"><button id="prev">&laquo; Prev</button><span id="pinfo"></span><button id="next">Next &raquo;</button></div>
 </div>
 <script>
-const DATA=__DATA__;let REGION='',view=[],page=0,PS=100,sortK=11,sortD=-1;
+const DATA=__DATA__,L=__LUTS__;
+// column map: i=field index, t=title, n=numeric, f=formatter
+const S=v=>v, LU=k=>(v=>L[k][v]||'');
+const COLS=[
+{h:'DC',i:0,w:48,k:1,t:'Physical location'},
+{h:'Warehouse',i:1,w:76,k:1,t:'Grouped location: 07BK rolls into 01NJ, 13PA into 15MP'},
+{h:'SKU',i:2,w:76,k:1},
+{h:'CAP Part #',i:3,w:78,k:1},
+{h:'Description',i:4,f:LU('desc'),w:200,k:1},
+{h:'Model',i:5,f:LU('model'),w:104},
+{h:'Vel',i:6,w:36,k:1,t:'ABC/D by cumulative revenue share within the warehouse group (A=top 60%, B=next 20, C=next 15, D=last 5)'},
+{h:'Src vel',i:7,w:48,t:"The export's own velocity, kept for reference"},
+{h:'Vendor',i:8,f:LU('vend'),w:84,k:1},
+{h:'Type',i:9,f:LU('type'),w:60,k:1},
+{h:'2nd vendor',i:10,f:LU('vend2'),w:78},
+{h:'ADU',i:11,n:1,d:3,w:52,t:'YTD units per selling day'},
+{h:'L35 ADU',i:12,n:1,d:3,w:58,t:'Units per selling day over the last 35 days'},
+{h:'Seas idx',i:13,n:1,d:3,w:56,t:'Prior-year seasonal multiplier (capped 0.6-1.8)'},
+{h:'Dem/day',i:14,n:1,d:3,w:58,k:1,t:'Recency-weighted, seasonally adjusted units per selling day'},
+{h:'Lead d',i:15,n:1,w:44,t:'Vendor lead days: oversea 100 / domestic 14'},
+{h:'Safety d',i:16,n:1,w:50,t:'A-item safety days: +21 oversea / +7 domestic'},
+{h:'Tgt days',i:17,n:1,w:50,t:'Lead + safety days'},
+{h:'Target',i:18,n:1,w:52,k:1,t:'Target inventory = demand/day x target days'},
+{h:'OnHand',i:19,n:1,w:54},
+{h:'OnDock',i:20,n:1,w:54},
+{h:'InTrans',i:21,n:1,w:54},
+{h:'OnOrder',i:22,n:1,w:54},
+{h:"Pos'n",i:23,n:1,w:50,k:1,t:'On hand + on dock + in transit + on order'},
+{h:'Buy',i:24,n:1,w:46,k:1,t:'Gross buy = target - position'},
+{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Combined 01NJ + 15MP onhand + intransit for this SKU, netted across DCs (highest demand claims first). ✓ = fully coverable by transfer; (n) = only n claimable here.'},
+{h:'Net buy',i:27,n:1,w:56,k:1,t:'Buy after transferring the claimable hub stock'}];
+let allCols=true;   // false = key columns only (fits one screen)
+const shown=()=>allCols?COLS:COLS.filter(c=>c.k);
+let REGION='',view=[],page=0,PS=100,sortK=24,sortD=-1;
 const $=id=>document.getElementById(id);
-const REGIONS=[...new Set(DATA.map(r=>r[12]))];
-const RDATA=()=>REGION?DATA.filter(r=>r[12]===REGION):DATA;
+const REGIONS=[...new Set(DATA.map(r=>r[28]))];
+const RDATA=()=>REGION?DATA.filter(r=>r[28]===REGION):DATA;
 
 // region toggle
 const rseg=$('rseg');
@@ -553,36 +652,59 @@ vel:makeMS('msVel','All velocities','velocities')};
 document.addEventListener('click',()=>document.querySelectorAll('.mspanel.open').forEach(p=>p.classList.remove('open')));
 document.addEventListener('keydown',e=>{if(e.key==='Escape')document.querySelectorAll('.mspanel.open').forEach(p=>p.classList.remove('open'))});
 
+// headers from the column map (widths inline so table-layout:fixed honors them)
+function buildHead(){const cs=shown();
+$('thr').innerHTML=cs.map(c=>`<th data-k="${c.i}" class="${c.n?'num':''}" style="width:${c.w}px"${c.t?` title="${c.t}"`:''}>${c.h}</th>`).join('');
+$('tbl').style.minWidth=cs.reduce((s,c)=>s+c.w,0)+'px';
+document.querySelectorAll('#tbl th[data-k]').forEach(th=>th.onclick=()=>{
+const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
+$('cAll').classList.toggle('on',allCols);$('cKey').classList.toggle('on',!allCols)}
+
 function refreshFilters(){const rows=RDATA();
 MS.wh.setOptions([...new Set(rows.map(r=>r[0]))].sort());
-MS.vt.setOptions([...new Set(rows.map(r=>r[6]).filter(Boolean))].sort());
-MS.vel.setOptions([...new Set(rows.map(r=>r[4]).filter(Boolean))].sort())}
-function apply(){const q=$('q').value.toLowerCase();
-view=RDATA().filter(r=>MS.wh.match(r[0])&&MS.vt.match(r[6])&&MS.vel.match(r[4])&&(!q||(r[1]+' '+r[2]+' '+r[3]+' '+r[5]).toLowerCase().includes(q)));
+MS.vt.setOptions([...new Set(rows.map(r=>r[9]).map(LU('type')).filter(Boolean))].sort());
+MS.vel.setOptions([...new Set(rows.map(r=>r[6]).filter(Boolean))].sort())}
+function apply(){const q=$('q').value.toLowerCase(),D=LU('desc'),V=LU('vend'),T=LU('type');
+view=RDATA().filter(r=>MS.wh.match(r[0])&&MS.vt.match(T(r[9]))&&MS.vel.match(r[6])
+&&(!q||(r[2]+' '+r[3]+' '+D(r[4])+' '+V(r[8])).toLowerCase().includes(q)));
 view.sort((a,b)=>{const x=a[sortK],y=b[sortK];return(typeof x==='number'?x-y:String(x).localeCompare(String(y)))*sortD});
 page=0;render()}
+// hub-availability cell: number + coverage marker + explanation
+function hubCell(r){const avail=r[25],alloc=r[26],buy=r[24];
+if(avail<0)return['',''];
+if(alloc>=buy&&buy>0)return[avail.toLocaleString()+' <span class="ok">&#10003;</span>',
+`Hubs (01NJ+15MP) hold ${avail}; ${alloc} claimable here - covers the full ${buy}-unit buy. Transfer instead of buying.`];
+if(alloc>0)return[alloc===avail?`<span class="part">${avail}</span>`:`${avail} <span class="part">(${alloc})</span>`,
+alloc===avail?`Hubs hold ${avail} - all claimable here, but short of the ${buy}-unit buy. Transfer ${alloc}, still buy ${buy-alloc}.`
+:`Hubs hold ${avail}, but only ${alloc} is left for this DC after higher-demand DCs claim theirs. Transfer ${alloc}, still buy ${buy-alloc}.`];
+if(avail>0)return[avail.toLocaleString(),
+`Hubs hold ${avail}, but it is fully claimed by higher-demand DCs for this SKU. No transfer available - buy all ${buy}.`];
+return['0',`No hub stock for this SKU - buy all ${buy}.`]}
 function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
 view.slice(page*PS,(page+1)*PS).forEach(r=>{const tr=document.createElement('tr');
-let av='',avt='';
-if(r[13]>=0){const avail=r[13],alloc=r[14],buy=r[11];
-av=avail.toLocaleString();
-if(alloc>=buy&&buy>0){av+=' <span class="ok">&#10003;</span>';avt=`15MP has ${avail}; ${alloc} claimable for this row - covers the full ${buy}-unit buy. Transfer instead of buying.`}
-else if(alloc>0){av=alloc===avail?`<span class="part">${avail}</span>`:`${avail} <span class="part">(${alloc})</span>`;
-avt=alloc===avail?`15MP has ${avail} - all of it claimable here, but short of the ${buy}-unit buy. Transfer ${alloc}, still buy ${buy-alloc}.`
-:`15MP has ${avail}, but only ${alloc} is left for this row after higher-demand warehouses claim theirs. Partial transfer; still buy ${buy-alloc}.`}
-else if(avail>0){avt=`15MP has ${avail}, but it is fully claimed by higher-demand warehouses for this SKU. No transfer available - buy all ${buy}.`}}
-tr.innerHTML=`<td>${r[0]}</td><td>${r[1]}</td><td>${r[2]||''}</td><td title="${r[3]}">${r[3]}</td><td>${r[4]||''}</td><td title="${r[5]||''}">${r[5]||'(none)'}</td><td>${r[6]||'-'}</td><td class="num">${(+r[7]).toFixed(3)}</td><td class="num">${r[9]}</td><td class="num">${r[10]}</td><td class="num"><b>${r[11]}</b></td><td class="num" title="${avt}">${av}</td>`;
+const [av,avt]=hubCell(r);
+tr.innerHTML=shown().map(c=>{
+if(c.i===25)return `<td class="num" title="${avt}">${av}</td>`;
+let v=c.f?c.f(r[c.i]):r[c.i];
+if(c.n)return `<td class="num">${c.d?(+v).toFixed(c.d):(+v).toLocaleString()}</td>`;
+const s=v===''||v==null?'':String(v);
+return `<td title="${s.replace(/"/g,'&quot;')}">${s}</td>`}).join('');
 tb.appendChild(tr)});
 $('count').textContent=view.length.toLocaleString()+' rows';
 $('pinfo').textContent=`page ${page+1} / ${Math.max(1,Math.ceil(view.length/PS))}`}
 $('q').addEventListener('input',apply);
 $('prev').onclick=()=>{if(page>0){page--;render()}};
 $('next').onclick=()=>{if((page+1)*PS<view.length){page++;render()}};
-document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{const k=+th.dataset.k;sortD=(k===sortK)?-sortD:-1;sortK=k;apply()});
+$('cKey').onclick=()=>{allCols=false;buildHead();render()};
+$('cAll').onclick=()=>{allCols=true;buildHead();render()};
+buildHead();
 $('csv').onclick=()=>{
-const hdr=['Region','Warehouse','ItemNo','CAP_ItemNum','Description','Velocity','Primary Vendor','Vendor Type','Demand ADU','Target Days','Target Qty','Position','Buy Qty','15MP Avail','15MP Claimable','Buy After 15MP Transfer'];
+const hdr=['Region','DC','Warehouse','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
-const csv=[hdr.join(',')].concat(view.map(r=>[r[12],...r.slice(0,12),r[13]<0?'':r[13],r[13]<0?'':r[14],r[13]<0?r[11]:r[11]-r[14]].map(esc).join(','))).join('\r\n');
+const D=LU('desc'),M=LU('model'),V=LU('vend'),T=LU('type'),V2=LU('vend2');
+const csv=[hdr.join(',')].concat(view.map(r=>[r[28],r[0],r[1],r[2],r[3],D(r[4]),M(r[5]),r[6],r[7],V(r[8]),T(r[9]),V2(r[10]),
+r[11],r[12],r[13],r[14],r[15],r[16],r[17],r[18],r[19],r[20],r[21],r[22],r[23],r[24],
+r[25]<0?'':r[25],r[25]<0?'':r[26],r[27]].map(esc).join(','))).join('\r\n');
 const a=document.createElement('a');
 a.href=URL.createObjectURL(new Blob(['\uFEFF'+csv],{type:'text/csv;charset=utf-8'}));
 const reg=(REGION||'all-regions').toLowerCase().replace(/\s+/g,'-');
@@ -592,12 +714,13 @@ a.click();URL.revokeObjectURL(a.href)};
 // ---- gross vs net-of-15MP-transfers ----
 let netMode=false;
 // qty(row): gross buy, or buy minus what 15MP can actually cover for that row
-const qty=r=>netMode?r[11]-(r[14]>0?r[14]:0):r[11];
+const qty=r=>netMode?r[27]:r[24];
+const vtype=r=>L.type[r[9]]||'';
 
 // ---- summary cards (region-scoped) ----
 function renderCards(){const rows=RDATA();
 let u=0,os=0,dom=0;
-for(const r of rows){const q=qty(r);u+=q;if(r[6]==='Oversea')os+=q;else if(r[6]==='Domestic')dom+=q}
+for(const r of rows){const q=qty(r);u+=q;const t=vtype(r);if(t==='Oversea')os+=q;else if(t==='Domestic')dom+=q}
 $('cSku').textContent=(netMode?rows.filter(r=>qty(r)>0).length:rows.length).toLocaleString();
 $('cUnits').textContent=u.toLocaleString();
 $('cOs').textContent=os.toLocaleString();
@@ -613,11 +736,11 @@ const tip=$('tip');
 function tipMove(e){tip.style.left=Math.min(e.clientX+14,innerWidth-tip.offsetWidth-8)+'px';tip.style.top=Math.min(e.clientY+14,innerHeight-tip.offsetHeight-8)+'px'}
 function hoverize(el,html){el.addEventListener('mousemove',e=>{tip.innerHTML=html;tip.style.display='block';tipMove(e)});el.addEventListener('mouseleave',()=>tip.style.display='none')}
 function vendAgg(){const m=new Map();
-for(const r of RDATA()){const q=qty(r);if(!q)continue;const k=(r[5]||'(none)')+'|'+(r[6]||'');m.set(k,(m.get(k)||0)+q)}
+for(const r of RDATA()){const q=qty(r);if(!q)continue;const k=(L.vend[r[8]]||'(none)')+'|'+vtype(r);m.set(k,(m.get(k)||0)+q)}
 return[...m.entries()].map(([k,v])=>{const[nm,t]=k.split('|');return[nm,t,v]}).sort((a,b)=>b[2]-a[2])}
 function whAgg(){const m=new Map();
-for(const r of RDATA()){const q=qty(r);if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
-if(r[6]==='Oversea')a[0]+=q;else if(r[6]==='Domestic')a[1]+=q;else a[2]+=q}
+for(const r of RDATA()){const q=qty(r),t=vtype(r);if(!m.has(r[0]))m.set(r[0],[0,0,0]);const a=m.get(r[0]);
+if(t==='Oversea')a[0]+=q;else if(t==='Domestic')a[1]+=q;else a[2]+=q}
 return[...m.entries()].map(([w,a])=>[w,...a]).filter(r=>r[1]+r[2]+r[3]>0).sort((a,b)=>(b[1]+b[2]+b[3])-(a[1]+a[2]+a[3]))}
 function renderVend(){
 const el=$('vchart');el.innerHTML='';
