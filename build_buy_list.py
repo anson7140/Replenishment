@@ -515,16 +515,22 @@ if(!was)panel.classList.add('open')};
 panel.onclick=e=>e.stopPropagation();
 function label(){btn.innerHTML=sel.size===0?`${allLabel} <span class="car">&#9662;</span>`
 :(sel.size===1?[...sel][0]:`${sel.size} ${noun}`)+` <span class="cnt">${sel.size}</span> <span class="car">&#9662;</span>`}
-function build(){panel.innerHTML='';
+let allBox=null,boxes=[];
+function sync(){if(allBox)allBox.checked=sel.size===0;
+boxes.forEach(([o,b])=>{b.checked=sel.has(o)});label()}
+function build(){panel.innerHTML='';boxes=[];
 const all=document.createElement('label');all.className='msopt msall';
-all.innerHTML=`<input type="checkbox" ${sel.size===0?'checked':''}><span>${allLabel}</span>`;
-all.querySelector('input').onchange=()=>{sel.clear();build();label();apply()};
+all.innerHTML=`<input type="checkbox"><span>${allLabel}</span>`;
+allBox=all.querySelector('input');
+allBox.onchange=()=>{sel.clear();sync();apply()};
 panel.appendChild(all);
 for(const o of opts){const l=document.createElement('label');l.className='msopt';
-l.innerHTML=`<input type="checkbox" ${sel.has(o)?'checked':''}><span>${o}</span>`;
-l.querySelector('input').onchange=ev=>{ev.target.checked?sel.add(o):sel.delete(o);build();label();apply()};
-panel.appendChild(l)}}
-return{setOptions(list){opts=list;[...sel].forEach(v=>{if(!opts.includes(v))sel.delete(v)});build();label()},
+l.innerHTML=`<input type="checkbox"><span>${o}</span>`;
+const b=l.querySelector('input');boxes.push([o,b]);
+b.onchange=()=>{b.checked?sel.add(o):sel.delete(o);sync();apply()};
+panel.appendChild(l)}
+sync()}
+return{setOptions(list){opts=list;[...sel].forEach(v=>{if(!opts.includes(v))sel.delete(v)});build()},
 match(v){return sel.size===0||sel.has(v)}}}
 const MS={wh:makeMS('msWh','All warehouses','warehouses'),
 vt:makeMS('msVt','All vendor types','types'),
