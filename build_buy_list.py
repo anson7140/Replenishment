@@ -365,7 +365,7 @@ def write_excel(df, buys, warns, out_path):
 
     df, buys = display_frame(df), display_frame(buys)
 
-    cols = ["Region", "Location", "Warehouse", "ItemNo", "CAP_ItemNum",
+    cols = ["Region", "Warehouse", "Location", "ItemNo", "CAP_ItemNum",
             "Product Desc", "Model", "Velocity", "Source Velocity",
             "Primary Vendor", "Vendor Type", "Secondary Vendor", "ADU",
             "Rolling Avg 35 ADU", "Seasonal Index", "Demand ADU", "Lead Days",
@@ -574,8 +574,8 @@ const DATA=__DATA__,L=__LUTS__;
 // column map: i=field index, t=title, n=numeric, f=formatter
 const S=v=>v, LU=k=>(v=>L[k][v]||'');
 const COLS=[
-{h:'Location',i:0,w:60,k:1,t:'Physical stocking location'},
 {h:'Warehouse',i:1,w:76,k:1,t:'True warehouse after rollup: 07BK into 01NJ, 13PA into 15MP'},
+{h:'Location',i:0,w:60,k:1,t:'Physical stocking location'},
 {h:'SKU',i:2,w:76,k:1},
 {h:'CAP Part #',i:3,w:78,k:1},
 {h:'Description',i:4,f:LU('desc'),w:200,k:1},
@@ -699,10 +699,10 @@ $('cKey').onclick=()=>{allCols=false;buildHead();render()};
 $('cAll').onclick=()=>{allCols=true;buildHead();render()};
 buildHead();
 $('csv').onclick=()=>{
-const hdr=['Region','Location','Warehouse','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
+const hdr=['Region','Warehouse','Location','ItemNo','CAP_ItemNum','Description','Model','Velocity','Source Velocity','Primary Vendor','Vendor Type','Secondary Vendor','ADU','L35 ADU','Seasonal Index','Demand ADU','Lead Days','Safety Days','Target Days','Target Qty','OnHand','OnDock','InTransit','OnOrder','Position','Buy Qty','Hub Avail','Hub Claimable','Net Buy Qty'];
 const esc=v=>{v=(v==null?'':String(v));return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v};
 const D=LU('desc'),M=LU('model'),V=LU('vend'),T=LU('type'),V2=LU('vend2');
-const csv=[hdr.join(',')].concat(view.map(r=>[r[28],r[0],r[1],r[2],r[3],D(r[4]),M(r[5]),r[6],r[7],V(r[8]),T(r[9]),V2(r[10]),
+const csv=[hdr.join(',')].concat(view.map(r=>[r[28],r[1],r[0],r[2],r[3],D(r[4]),M(r[5]),r[6],r[7],V(r[8]),T(r[9]),V2(r[10]),
 r[11],r[12],r[13],r[14],r[15],r[16],r[17],r[18],r[19],r[20],r[21],r[22],r[23],r[24],
 r[25]<0?'':r[25],r[25]<0?'':r[26],r[27]].map(esc).join(','))).join('\r\n');
 const a=document.createElement('a');
