@@ -805,16 +805,22 @@ def main():
 
     xlsx_path = os.path.join(OUT_DIR, f"Buy List {run_date}.xlsx")
     write_excel(df, buys, warns, xlsx_path)
-    write_html(buys, warns, run_date, os.path.join(OUT_DIR, "CAP.html"))
-    # copy to repo root so GitHub Pages can serve it; index.html redirects
-    # to CAP.html so the Pages homepage URL keeps working
-    import shutil
-    shutil.copyfile(os.path.join(OUT_DIR, "CAP.html"), os.path.join(HERE, "CAP.html"))
-    with open(os.path.join(HERE, "index.html"), "w", encoding="utf-8") as f:
-        f.write('<!DOCTYPE html><html><head><meta charset="utf-8">'
-                '<meta http-equiv="refresh" content="0; url=CAP.html">'
-                '<title>KSI Buy List</title></head>'
-                '<body><a href="CAP.html">Open the CAP buy list</a></body></html>')
+    html_path = os.path.join(OUT_DIR, "CAP.html")
+    write_html(buys, warns, run_date, html_path)
+
+    # Publishing copies (repo root CAP.html + index.html redirect for Pages)
+    # are only written when this folder is the git repo. A shared copy of the
+    # folder just gets output/CAP.html to open locally; pass --local to skip
+    # the copies even inside the repo.
+    publish = os.path.isdir(os.path.join(HERE, ".git")) and "--local" not in sys.argv
+    if publish:
+        import shutil
+        shutil.copyfile(html_path, os.path.join(HERE, "CAP.html"))
+        with open(os.path.join(HERE, "index.html"), "w", encoding="utf-8") as f:
+            f.write('<!DOCTYPE html><html><head><meta charset="utf-8">'
+                    '<meta http-equiv="refresh" content="0; url=CAP.html">'
+                    '<title>KSI Buy List</title></head>'
+                    '<body><a href="CAP.html">Open the CAP buy list</a></body></html>')
 
     print(f"rows after filters: {len(df):,}")
     for reg, g in buys.groupby("Region"):
@@ -824,7 +830,13 @@ def main():
               f" / no-vendor {int(g['Vendor Missing'].sum()):,})")
     print(f"TOTAL buy lines: {len(buys):,}  buy units: {int(buys['Buy Qty'].sum()):,}")
     print(f"wrote: {xlsx_path}")
-    print(f"wrote: {os.path.join(OUT_DIR, 'CAP.html')}")
+    print(f"wrote: {html_path}   <- open this in a browser")
+    if publish:
+        print(f"wrote: {os.path.join(HERE, 'CAP.html')} (+ index.html) "
+              f"- commit and push to publish")
+    else:
+        print("local-only run: no repo files written. Send the report to "
+              "whoever owns the publish step.")
 
 
 if __name__ == "__main__":
