@@ -162,11 +162,11 @@ check("R12c: zero- and negative-revenue items are classified D",
 
 # R13: hub pooling and netted allocation
 hub_rows = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(b.HUBS))]
-pool = (hub_rows["Location_Onhand"]
-        + hub_rows["Location_InTransit"]).groupby(hub_rows["ItemNo"]).sum()
+pool = (hub_rows["Location_Onhand"] + hub_rows["Location_InTransit"]
+        + hub_rows["Location_OnOrder"]).groupby(hub_rows["ItemNo"]).sum()
 ne_other = df[(df["Region"] == "Northeast")
               & (~df["Warehouse"].isin(b.HUBS))]
-check("R13a: Hub Avail = combined 01NJ + 15MP onhand + intransit",
+check("R13a: Hub Avail = combined 01NJ + 15MP onhand + intransit + onorder",
       (ne_other["Hub Avail"].fillna(0)
        == ne_other["ItemNo"].map(pool).fillna(0)).all())
 alloc_by_item = ne_other.groupby("ItemNo")["Hub Alloc"].sum()

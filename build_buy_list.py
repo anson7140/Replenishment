@@ -101,8 +101,29 @@ SCHEMA = ["Region", "Warehouse", "ItemNo", "CAP_ItemNum", "Product Desc",
           "Location_OnOnDock", "Location_InTransit", "Location_OnOrder"]
 
 
+MASTER_NOTES = []       # data-quality notes raised while loading the master
+
+# Master fields the model reads. Required ones abort the run if absent;
+# optional ones are filled blank and reported, since the master's column set
+# has changed between weekly extracts.
+MASTER_REQUIRED = ["ItemNo", "Patent", "Companywide veloicty",
+                   "Primary Vendor", "Link No_"]
+MASTER_OPTIONAL = ["Secondary Vendor"]
+
+
 def load_master_vendor():
     master = pd.read_csv(MASTER_CSV, encoding="utf-8-sig")
+    missing_req = [c for c in MASTER_REQUIRED if c not in master.columns]
+    if missing_req:
+        raise KeyError(f"KSI_Item_master.csv is missing required column(s) "
+                       f"{missing_req}; file has: {list(master.columns)}")
+    MASTER_NOTES.clear()
+    for c in MASTER_OPTIONAL:
+        if c not in master.columns:
+            master[c] = ""
+            MASTER_NOTES.append(
+                f"KSI_Item_master.csv no longer carries a '{c}' column - that "
+                f"field is blank in this run's output.")
     master["ItemNo"] = master["ItemNo"].astype(str).str.strip()
 
     vend = pd.read_csv(VENDOR_CSV, encoding="utf-8-sig")
@@ -289,12 +310,13 @@ def compute(df, vtype):
     ).astype(int)
     df["Buy Qty"] = (df["Target Qty"] - df["Position"]).clip(lower=0).astype(int)
 
-    # 15MP and 01NJ are the NE overflow hubs. Pool their onhand+intransit per
-    # SKU and expose it on every other NE row, then NET it across those rows:
-    # a unit can only cover one warehouse, so allocate highest-demand first.
+    # 15MP and 01NJ are the NE overflow hubs. Pool their onhand + intransit +
+    # onorder per SKU and expose it on every other NE row, then NET it across
+    # those rows: a unit can only cover one warehouse, so allocate the pool
+    # highest-demand first.
     hub = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(HUBS))]
-    hub_avail = (hub["Location_Onhand"] + hub["Location_InTransit"]).groupby(
-        hub["ItemNo"]).sum()
+    hub_avail = (hub["Location_Onhand"] + hub["Location_InTransit"]
+                 + hub["Location_OnOrder"]).groupby(hub["ItemNo"]).sum()
     is_ne_other = (df["Region"] == "Northeast") & (~df["Warehouse"].isin(HUBS))
     df["Hub Avail"] = np.where(is_ne_other,
                                df["ItemNo"].map(hub_avail).fillna(0), np.nan)
@@ -332,13 +354,36 @@ def build_all():
 
 
 def data_quality_warnings(df):
-    warns = []
+    warns = list(MASTER_NOTES)
+
+    # A Northeast warehouse absent from the export gets no buys at all, which
+    # is invisible unless we say so.
+    missing = [w for w in CAP_WAREHOUSES
+               if w not in set(df.loc[df["Region"] == "Northeast", "Warehouse"])]
+    if missing:
+        warns.append(
+            f"[Northeast] Warehouse(s) {', '.join(missing)} are not present in "
+            f"CAP Raw at all - no demand, no inventory, and no buy lines were "
+            f"generated for them. Confirm this is intentional, not a dropped "
+            f"filter in the export.")
+
     for (reg, wh), g in df.groupby(["Region", "Warehouse"]):
         if g["Volume"].sum() == 0 and g["Position"].sum() == 0:
             warns.append(
                 f"[{reg}] Warehouse {wh}: all volume and inventory are zero in "
                 f"this export ({len(g):,} rows) - likely truncated by the source "
                 f"system. No buys generated for {wh}; re-export needed."
+            )
+        elif g["Volume"].sum() > 0 and g["Position"].sum() == 0:
+            # Sales but literally no inventory anywhere: the buy for every row
+            # becomes the full target, which overstates the order.
+            units = int(g.loc[g["Buy Qty"] > 0, "Buy Qty"].sum())
+            warns.append(
+                f"[{reg}] Warehouse {wh}: sold {int(g['Volume'].sum()):,} units "
+                f"YTD but reports ZERO on-hand, on-dock, in-transit and on-order "
+                f"on all {len(g):,} rows. Buy qty there equals the full target "
+                f"({units:,} units) and is almost certainly overstated - verify "
+                f"the inventory columns for {wh} before ordering."
             )
     for reg, g in df.groupby("Region"):
         n = int((g["Vendor Missing"] & (g["Buy Qty"] > 0)).sum())
@@ -402,7 +447,7 @@ def write_excel(df, buys, warns, out_path):
         "Location = physical stocking location. Warehouse = true warehouse after rollup: 07BK rolls into 01NJ and 13PA into 15MP; all other locations stand alone. Velocity, the warehouse slicer, and the warehouse chart all use the rolled-up Warehouse.",
         f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock. The export's companywide letter is kept as Source Velocity for reference only - it is one value per item, identical at every warehouse.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. Safety stock (+21 days oversea / +7 domestic) is applied to items whose COMPUTED per-warehouse Velocity is A, so the buffer lands only where the SKU earns A-class revenue at that warehouse. Days = selling days, same basis as ADU.",
-        "Hub Avail = combined onhand + intransit at the 01NJ and 15MP hubs for that SKU, shown on every other Northeast location's rows. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
+        "Hub Avail = combined onhand + intransit + onorder at the 01NJ and 15MP hubs for that SKU (on-dock excluded), shown on every other Northeast location's rows. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
         "Excluded: patented items and companywide P-velocity items per KSI_Item_master (Florida also honors its export's own Patented flag).",
@@ -602,7 +647,7 @@ const COLS=[
 {h:'OnOrder',i:22,n:1,w:54},
 {h:"Pos'n",i:23,n:1,w:50,k:1,t:'On hand + on dock + in transit + on order'},
 {h:'Buy',i:24,n:1,w:46,k:1,t:'Gross buy = target - position'},
-{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Combined 01NJ + 15MP onhand + intransit for this SKU, netted across DCs (highest demand claims first). ✓ = fully coverable by transfer; (n) = only n claimable here.'},
+{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Combined 01NJ + 15MP onhand + intransit + onorder for this SKU, netted across DCs (highest demand claims first). ✓ = fully coverable by transfer; (n) = only n claimable here.'},
 {h:'Net buy',i:27,n:1,w:56,k:1,t:'Buy after transferring the claimable hub stock'}];
 let allCols=true;   // false = key columns only (fits one screen)
 const shown=()=>allCols?COLS:COLS.filter(c=>c.k);
@@ -676,7 +721,7 @@ page=0;render()}
 function hubCell(r){const avail=r[25],alloc=r[26],buy=r[24];
 if(avail<0)return['',''];
 if(alloc>=buy&&buy>0)return[avail.toLocaleString()+' <span class="ok">&#10003;</span>',
-`Hubs (01NJ+15MP) hold ${avail}; ${alloc} claimable here - covers the full ${buy}-unit buy. Transfer instead of buying.`];
+`Hubs (01NJ+15MP) have ${avail} on hand/in transit/on order; ${alloc} claimable here - covers the full ${buy}-unit buy. Transfer instead of buying.`];
 if(alloc>0)return[alloc===avail?`<span class="part">${avail}</span>`:`${avail} <span class="part">(${alloc})</span>`,
 alloc===avail?`Hubs hold ${avail} - all claimable here, but short of the ${buy}-unit buy. Transfer ${alloc}, still buy ${buy-alloc}.`
 :`Hubs hold ${avail}, but only ${alloc} is left for this DC after higher-demand DCs claim theirs. Transfer ${alloc}, still buy ${buy-alloc}.`];
