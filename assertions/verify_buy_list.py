@@ -161,19 +161,31 @@ check("R12c: zero- and negative-revenue items are classified D",
               .transform("sum") <= 0, "Velocity"] == "D").all())
 
 # R13: hub pooling and netted allocation
+def other_pool(loc):
+    """Hub stock a given location may draw on: all hubs except itself."""
+    h = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(b.HUBS))
+           & (df["Warehouse"] != loc)]
+    return (h["Location_Onhand"] + h["Location_InTransit"]
+            + h["Location_OnOrder"]).groupby(h["ItemNo"]).sum()
+
 hub_rows = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(b.HUBS))]
 pool = (hub_rows["Location_Onhand"] + hub_rows["Location_InTransit"]
         + hub_rows["Location_OnOrder"]).groupby(hub_rows["ItemNo"]).sum()
 ne_other = df[(df["Region"] == "Northeast")
               & (~df["Warehouse"].isin(b.HUBS))]
-check("R13a: Hub Avail = combined 01NJ + 15MP onhand + intransit + onorder",
+check("R13a: Hub Avail = eligible hub stock (onhand+intransit+onorder, "
+      "excluding the row's own hub)",
       (ne_other["Hub Avail"].fillna(0)
        == ne_other["ItemNo"].map(pool).fillna(0)).all())
 alloc_by_item = ne_other.groupby("ItemNo")["Hub Alloc"].sum()
 check("R13b: allocation never exceeds the hub pool for any SKU",
       (alloc_by_item <= alloc_by_item.index.map(pool).fillna(0) + 1e-6).all())
-check("R13c: hub rows themselves carry no hub availability",
-      df.loc[df["Warehouse"].isin(b.HUBS), "Hub Avail"].isna().all())
+check("R13c: a hub never counts its own stock as transferable",
+      all((df.loc[(df["Warehouse"] == h) & (df["Region"] == "Northeast"),
+                  "Hub Avail"].fillna(0)
+           <= df.loc[(df["Warehouse"] == h) & (df["Region"] == "Northeast"),
+                     "ItemNo"].map(other_pool(h)).fillna(0) + 1e-6).all()
+          for h in b.HUBS))
 check("R13d: Net Buy Qty = Buy Qty - Hub Alloc (floored at 0)",
       (out["Net Buy Qty"] == (out["Buy Qty"]
        - out["Hub Alloc"].fillna(0)).clip(lower=0)).all())

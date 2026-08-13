@@ -314,26 +314,54 @@ def compute(df, vtype):
     # onorder per SKU and expose it on every other NE row, then NET it across
     # those rows: a unit can only cover one warehouse, so allocate the pool
     # highest-demand first.
-    hub = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(HUBS))]
-    hub_avail = (hub["Location_Onhand"] + hub["Location_InTransit"]
-                 + hub["Location_OnOrder"]).groupby(hub["ItemNo"]).sum()
-    is_ne_other = (df["Region"] == "Northeast") & (~df["Warehouse"].isin(HUBS))
-    df["Hub Avail"] = np.where(is_ne_other,
-                               df["ItemNo"].map(hub_avail).fillna(0), np.nan)
+    is_ne = df["Region"] == "Northeast"
+    hub = df[is_ne & (df["Warehouse"].isin(HUBS))]
+    # stock per (item, hub) so a hub can draw on the OTHER hub but not on
+    # itself - its own stock is already counted in its Position.
+    stock = (hub["Location_Onhand"] + hub["Location_InTransit"]
+             + hub["Location_OnOrder"]).groupby(
+                 [hub["ItemNo"], hub["Warehouse"]]).sum()
+    per_item = {}
+    for (item, wh), qty in stock.items():
+        if qty > 0:
+            per_item.setdefault(item, {})[wh] = float(qty)
 
-    df["Hub Alloc"] = np.where(is_ne_other, 0.0, np.nan)
-    cand = df[is_ne_other & (df["Buy Qty"] > 0)
-              & (df["Hub Avail"] > 0)].sort_values(
+    def sources_for(item, loc):
+        """Hub stock this location may draw on: every hub except itself."""
+        return {h: q for h, q in per_item.get(item, {}).items() if h != loc}
+
+    df["Hub Avail"] = np.where(is_ne, 0.0, np.nan)
+    ne_idx = df.index[is_ne]
+    df.loc[ne_idx, "Hub Avail"] = [
+        sum(sources_for(i, w).values())
+        for i, w in zip(df.loc[ne_idx, "ItemNo"], df.loc[ne_idx, "Warehouse"])]
+
+    # Net the pool: a unit at a hub can only serve one location, so allocate
+    # highest demand/day first, drawing from the eligible hubs.
+    df["Hub Alloc"] = np.where(is_ne, 0.0, np.nan)
+    cand = df[is_ne & (df["Buy Qty"] > 0) & (df["Hub Avail"] > 0)].sort_values(
         ["ItemNo", "Demand ADU"], ascending=[True, False])
+    remaining = {i: dict(h) for i, h in per_item.items()}
     alloc = {}
-    remaining = {}
-    for idx, item, need, avail in zip(cand.index, cand["ItemNo"],
-                                      cand["Buy Qty"], cand["Hub Avail"]):
-        left = remaining.get(item, avail)
-        take = min(left, need)
-        if take > 0:
-            alloc[idx] = take
-            remaining[item] = left - take
+    for idx, item, loc, need in zip(cand.index, cand["ItemNo"],
+                                    cand["Warehouse"], cand["Buy Qty"]):
+        pool = remaining.get(item)
+        if not pool:
+            continue
+        took = 0.0
+        for h in list(pool):
+            if took >= need:
+                break
+            if h == loc:                 # cannot transfer from itself
+                continue
+            take = min(pool[h], need - took)
+            if take > 0:
+                pool[h] -= take
+                took += take
+                if pool[h] <= 0:
+                    del pool[h]
+        if took > 0:
+            alloc[idx] = took
     if alloc:
         df.loc[list(alloc), "Hub Alloc"] = list(alloc.values())
     df["Net Buy Qty"] = (df["Buy Qty"]
@@ -447,7 +475,7 @@ def write_excel(df, buys, warns, out_path):
         "Location = physical stocking location. Warehouse = true warehouse after rollup: 07BK rolls into 01NJ and 13PA into 15MP; all other locations stand alone. Velocity, the warehouse slicer, and the warehouse chart all use the rolled-up Warehouse.",
         f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock. The export's companywide letter is kept as Source Velocity for reference only - it is one value per item, identical at every warehouse.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. Safety stock (+21 days oversea / +7 domestic) is applied to items whose COMPUTED per-warehouse Velocity is A, so the buffer lands only where the SKU earns A-class revenue at that warehouse. Days = selling days, same basis as ADU.",
-        "Hub Avail = combined onhand + intransit + onorder at the 01NJ and 15MP hubs for that SKU (on-dock excluded), shown on every other Northeast location's rows. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
+        "Hub Avail = onhand + intransit + onorder at the 01NJ and 15MP hubs for that SKU (on-dock excluded), shown on every Northeast row. A hub sees only the OTHER hub's stock - its own is already counted in its Position. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
         "Excluded: patented items and companywide P-velocity items per KSI_Item_master (Florida also honors its export's own Patented flag).",
@@ -647,7 +675,7 @@ const COLS=[
 {h:'OnOrder',i:22,n:1,w:54},
 {h:"Pos'n",i:23,n:1,w:50,k:1,t:'On hand + on dock + in transit + on order'},
 {h:'Buy',i:24,n:1,w:46,k:1,t:'Gross buy = target - position'},
-{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Combined 01NJ + 15MP onhand + intransit + onorder for this SKU, netted across DCs (highest demand claims first). ✓ = fully coverable by transfer; (n) = only n claimable here.'},
+{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Hub stock (01NJ + 15MP onhand + intransit + onorder) this location can draw on for this SKU - a hub sees only the other hub. Netted across locations, highest demand claims first. ✓ = fully coverable by transfer; (n) = only n claimable here.'},
 {h:'Net buy',i:27,n:1,w:56,k:1,t:'Buy after transferring the claimable hub stock'}];
 let allCols=true;   // false = key columns only (fits one screen)
 const shown=()=>allCols?COLS:COLS.filter(c=>c.k);
@@ -721,12 +749,12 @@ page=0;render()}
 function hubCell(r){const avail=r[25],alloc=r[26],buy=r[24];
 if(avail<0)return['',''];
 if(alloc>=buy&&buy>0)return[avail.toLocaleString()+' <span class="ok">&#10003;</span>',
-`Hubs (01NJ+15MP) have ${avail} on hand/in transit/on order; ${alloc} claimable here - covers the full ${buy}-unit buy. Transfer instead of buying.`];
+`Transferable hub stock for this SKU: ${avail}; ${alloc} claimable here - covers the full ${buy}-unit buy. Transfer instead of buying.`];
 if(alloc>0)return[alloc===avail?`<span class="part">${avail}</span>`:`${avail} <span class="part">(${alloc})</span>`,
-alloc===avail?`Hubs hold ${avail} - all claimable here, but short of the ${buy}-unit buy. Transfer ${alloc}, still buy ${buy-alloc}.`
-:`Hubs hold ${avail}, but only ${alloc} is left for this DC after higher-demand DCs claim theirs. Transfer ${alloc}, still buy ${buy-alloc}.`];
+alloc===avail?`${avail} transferable - all claimable here, but short of the ${buy}-unit buy. Transfer ${alloc}, still buy ${buy-alloc}.`
+:`${avail} transferable, but only ${alloc} is left for this location after higher-demand DCs claim theirs. Transfer ${alloc}, still buy ${buy-alloc}.`];
 if(avail>0)return[avail.toLocaleString(),
-`Hubs hold ${avail}, but it is fully claimed by higher-demand DCs for this SKU. No transfer available - buy all ${buy}.`];
+`${avail} transferable, but it is fully claimed by higher-demand locations for this SKU. No transfer available - buy all ${buy}.`];
 return['0',`No hub stock for this SKU - buy all ${buy}.`]}
 function render(){const tb=$('tbl').querySelector('tbody');tb.innerHTML='';
 view.slice(page*PS,(page+1)*PS).forEach(r=>{const tr=document.createElement('tr');
