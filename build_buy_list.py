@@ -71,6 +71,10 @@ CAP_WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"
 HUBS = ["01NJ", "15MP"]
 # Feeder DC -> hub it rolls up into, for the grouped "Warehouse" column.
 WH_GROUP = {"07BK": "01NJ", "13PA": "15MP"}
+# Feeders carry no inventory of their own: they sell, but ship out of their
+# hub. Their demand is folded into the hub's target and they raise no buy
+# lines, so a zero inventory position there is expected, not a data fault.
+NON_STOCKING = ["07BK", "13PA"]
 
 # Velocity: cumulative share of revenue within each warehouse group.
 VEL_A, VEL_B, VEL_C = 0.60, 0.80, 0.95   # A top 60%, B next 20, C next 15, D last 5
@@ -264,8 +268,52 @@ def compute(df, vtype):
         1.0,
     )
     df["Seasonal Index"] = np.clip(idx, *SEASONAL_CAP).round(3)
-    df["Demand ADU"] = (df["_base"] * df["Seasonal Index"]).round(5)
+    df["Own Demand ADU"] = (df["_base"] * df["Seasonal Index"]).round(5)
     df = df.drop(columns="_base")
+
+    # Non-stocking feeders ship out of their hub, so their demand belongs to
+    # the hub's target. Fold it in, then zero the feeder's own demand: it
+    # keeps its row (for visibility) but raises no buy of its own.
+    feeder = df["Warehouse"].isin(NON_STOCKING) & (df["Region"] == "Northeast")
+    df["Feeder Demand ADU"] = 0.0
+    if feeder.any():
+        moved = (df.loc[feeder]
+                 .assign(hub=df.loc[feeder, "Warehouse"].map(WH_GROUP))
+                 .groupby(["hub", "ItemNo"])["Own Demand ADU"].sum())
+        moved = moved[moved > 0]
+
+        # A feeder item the hub does not stock has no row to receive the
+        # demand. Create one (zero inventory, zero own demand) so the demand
+        # is still covered instead of silently vanishing.
+        hub_keys = set(zip(df.loc[df["Warehouse"].isin(HUBS), "Warehouse"],
+                           df.loc[df["Warehouse"].isin(HUBS), "ItemNo"]))
+        gaps = [k for k in moved.index if k not in hub_keys]
+        if gaps:
+            src = (df.loc[feeder]
+                   .assign(hub=df.loc[feeder, "Warehouse"].map(WH_GROUP))
+                   .drop_duplicates(["hub", "ItemNo"])
+                   .set_index(["hub", "ItemNo"]))
+            new = src.loc[gaps].reset_index()
+            new["Warehouse"] = new["hub"]
+            new = new.drop(columns="hub")
+            for c in ["Volume", "PY Volume", "Volume_Prior Year", "ADU",
+                      "Rolling Avg 35 ADU", "Revenue", "Location_Onhand",
+                      "Location_OnOnDock", "Location_InTransit",
+                      "Location_OnOrder", "Own Demand ADU"]:
+                new[c] = 0.0
+            new["Seasonal Index"] = 1.0
+            df = pd.concat([df, new], ignore_index=True)
+            feeder = (df["Warehouse"].isin(NON_STOCKING)
+                      & (df["Region"] == "Northeast"))
+
+        key = pd.MultiIndex.from_arrays([df["Warehouse"], df["ItemNo"]])
+        is_hub_row = (df["Region"] == "Northeast") & df["Warehouse"].isin(HUBS)
+        df.loc[is_hub_row, "Feeder Demand ADU"] = (
+            pd.Series(key[is_hub_row].map(moved), index=df.index[is_hub_row])
+            .fillna(0.0).values)
+    df["Demand ADU"] = (df["Own Demand ADU"]
+                        + df["Feeder Demand ADU"]).round(5)
+    df.loc[feeder, "Demand ADU"] = 0.0
 
     # --- warehouse grouping: feeder DCs roll up into their hub --------------
     df["WH Group"] = df["Warehouse"].replace(WH_GROUP)
@@ -402,7 +450,8 @@ def data_quality_warnings(df):
                 f"this export ({len(g):,} rows) - likely truncated by the source "
                 f"system. No buys generated for {wh}; re-export needed."
             )
-        elif g["Volume"].sum() > 0 and g["Position"].sum() == 0:
+        elif (g["Volume"].sum() > 0 and g["Position"].sum() == 0
+              and wh not in NON_STOCKING):
             # Sales but literally no inventory anywhere: the buy for every row
             # becomes the full target, which overstates the order.
             units = int(g.loc[g["Buy Qty"] > 0, "Buy Qty"].sum())
@@ -444,7 +493,8 @@ def write_excel(df, buys, warns, out_path):
     cols = ["Region", "Warehouse", "Location", "ItemNo", "CAP_ItemNum",
             "Product Desc", "Model", "Velocity", "Source Velocity",
             "Primary Vendor", "Vendor Type", "Secondary Vendor", "ADU",
-            "Rolling Avg 35 ADU", "Seasonal Index", "Demand ADU", "Lead Days",
+            "Rolling Avg 35 ADU", "Seasonal Index", "Own Demand ADU",
+            "Feeder Demand ADU", "Demand ADU", "Lead Days",
             "Safety Days", "Target Days", "Target Qty", "Location_Onhand",
             "Location_OnOnDock", "Location_InTransit", "Location_OnOrder",
             "Position", "Buy Qty", "Hub Avail", "Hub Alloc", "Net Buy Qty",
@@ -472,6 +522,7 @@ def write_excel(df, buys, warns, out_path):
         *(f"[{r}] Demand basis: {m}." for r, m in modes.items()),
         "Northeast YTD ADU = Volume / 149 selling days (Jan 1 - Jul 31 2026) as provided in CAP Raw. Florida ADU as provided in FL Raw (source-computed daily rate).",
         "Seasonal index = (LY Aug-Dec daily rate) / (LY Jan-Jul daily rate) from PY Volume and Volume_Prior Year; capped 0.6-1.8; applied only when full-LY volume >= 6 units. FL Raw carries no LY columns, so Florida's index is 1.0.",
+        "Non-stocking locations (07BK, 13PA) hold no inventory - they sell but ship out of their hub. Their demand is added to the hub's Demand ADU (see Feeder Demand ADU) and they raise no buy lines of their own; a zero inventory position there is expected.",
         "Location = physical stocking location. Warehouse = true warehouse after rollup: 07BK rolls into 01NJ and 13PA into 15MP; all other locations stand alone. Velocity, the warehouse slicer, and the warehouse chart all use the rolled-up Warehouse.",
         f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock. The export's companywide letter is kept as Source Velocity for reference only - it is one value per item, identical at every warehouse.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. Safety stock (+21 days oversea / +7 domestic) is applied to items whose COMPUTED per-warehouse Velocity is A, so the buffer lands only where the SKU earns A-class revenue at that warehouse. Days = selling days, same basis as ADU.",

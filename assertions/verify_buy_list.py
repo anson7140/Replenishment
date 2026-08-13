@@ -190,4 +190,15 @@ check("R13d: Net Buy Qty = Buy Qty - Hub Alloc (floored at 0)",
       (out["Net Buy Qty"] == (out["Buy Qty"]
        - out["Hub Alloc"].fillna(0)).clip(lower=0)).all())
 
+# R14: non-stocking feeders roll their demand into their hub
+ne_all = df[df["Region"] == "Northeast"]
+check("R14a: feeder demand is conserved - nothing lost in the rollup",
+      abs(ne_all["Own Demand ADU"].sum() - ne_all["Demand ADU"].sum()) < 1e-4)
+check("R14b: each feeder's demand lands entirely at its hub",
+      all(abs(ne_all.loc[ne_all["Warehouse"] == f, "Own Demand ADU"].sum()
+              - ne_all.loc[ne_all["Warehouse"] == h, "Feeder Demand ADU"].sum())
+          < 1e-4 for f, h in b.WH_GROUP.items()))
+check("R14c: non-stocking feeders raise no buy lines",
+      not len(out[out["Location"].isin(b.NON_STOCKING)]))
+
 print(f"\n{passed} assertions passed.")
