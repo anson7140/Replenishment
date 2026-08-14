@@ -161,20 +161,27 @@ check("R12c: zero- and negative-revenue items are classified D",
               .transform("sum") <= 0, "Velocity"] == "D").all())
 
 # R13: hub pooling and netted allocation
+def surplus_of(rows):
+    """Stock a hub can spare: inventory above its own target, never more
+    than the inventory it actually holds."""
+    return np.minimum(
+        (rows["Position"] - rows["Target Qty"]).clip(lower=0),
+        rows["Location_Onhand"] + rows["Location_OnOnDock"]
+        + rows["Location_InTransit"] + rows["Location_OnOrder"])
+
+
 def other_pool(loc):
-    """Hub stock a given location may draw on: all hubs except itself."""
+    """Surplus hub stock a location may draw on: all hubs except itself."""
     h = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(b.HUBS))
            & (df["Warehouse"] != loc)]
-    return (h["Location_Onhand"] + h["Location_InTransit"]
-            + h["Location_OnOrder"]).groupby(h["ItemNo"]).sum()
+    return surplus_of(h).groupby(h["ItemNo"]).sum()
 
 hub_rows = df[(df["Region"] == "Northeast") & (df["Warehouse"].isin(b.HUBS))]
-pool = (hub_rows["Location_Onhand"] + hub_rows["Location_InTransit"]
-        + hub_rows["Location_OnOrder"]).groupby(hub_rows["ItemNo"]).sum()
+pool = surplus_of(hub_rows).groupby(hub_rows["ItemNo"]).sum()
 ne_other = df[(df["Region"] == "Northeast")
               & (~df["Warehouse"].isin(b.HUBS))]
-check("R13a: Hub Avail = eligible hub stock (onhand+intransit+onorder, "
-      "excluding the row's own hub)",
+check("R13a: Hub Avail = eligible hub SURPLUS (stock above the hub's own "
+      "target, excluding the row's own hub)",
       (ne_other["Hub Avail"].fillna(0)
        == ne_other["ItemNo"].map(pool).fillna(0)).all())
 alloc_by_item = ne_other.groupby("ItemNo")["Hub Alloc"].sum()
@@ -200,5 +207,12 @@ check("R14b: each feeder's demand lands entirely at its hub",
           < 1e-4 for f, h in b.WH_GROUP.items()))
 check("R14c: non-stocking feeders raise no buy lines",
       not len(out[out["Location"].isin(b.NON_STOCKING)]))
+
+# R15: a hub short of its own target lends nothing
+for h in b.HUBS:
+    rows = df[(df["Region"] == "Northeast") & (df["Warehouse"] == h)]
+    short = rows[rows["Position"] < rows["Target Qty"]]
+    check(f"R15 {h}: rows short of own target offer zero surplus",
+          (surplus_of(short) == 0).all())
 
 print(f"\n{passed} assertions passed.")
