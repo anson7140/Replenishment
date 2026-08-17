@@ -75,6 +75,10 @@ HUBS = ["01NJ", "15MP"]
 # 15MP is the top of the supply chain: it feeds the network but is never shown
 # as drawing on anyone, so its rows carry no hub availability.
 HUB_NO_RECEIVE = ["15MP"]
+# Hubs that lend their whole inventory. Any other hub lends only what it does
+# not need for its own target, so it never gives away stock it is short of and
+# then buys to replace it.
+HUB_LENDS_ALL = ["15MP"]
 # Feeder DC -> hub it rolls up into, for the grouped "Warehouse" column.
 WH_GROUP = {"07BK": "01NJ", "13PA": "15MP"}
 # Feeders carry no inventory of their own: they sell, but ship out of their
@@ -370,13 +374,21 @@ def compute(df, vtype):
     # highest-demand first.
     is_ne = df["Region"] == "Northeast"
     hub = df[is_ne & (df["Warehouse"].isin(HUBS))]
-    # Each hub offers its total inventory: onhand + ondock + intransit +
-    # onorder. Locations other than 01NJ and 15MP can draw on both hubs;
-    # 01NJ draws on 15MP only (never its own stock, already in its Position);
-    # 15MP is the source of supply and draws on nobody.
-    stock = (hub["Location_Onhand"] + hub["Location_OnOnDock"]
-             + hub["Location_InTransit"] + hub["Location_OnOrder"]).groupby(
-                 [hub["ItemNo"], hub["Warehouse"]]).sum()
+    # What each hub lends, from total inventory (onhand + ondock + intransit +
+    # onorder):
+    #   15MP lends all of it - it is the network's source of supply.
+    #   01NJ lends only what it does not need for its own target, so it never
+    #     gives away stock it is short of and then buys to replace it.
+    # Locations other than 01NJ and 15MP draw on both hubs; 01NJ draws on 15MP
+    # only (its own stock is already in its Position); 15MP draws on nobody.
+    total_inv = (hub["Location_Onhand"] + hub["Location_OnOnDock"]
+                 + hub["Location_InTransit"] + hub["Location_OnOrder"])
+    surplus = np.minimum(
+        (hub["Position"] - hub["Target Qty"]).clip(lower=0), total_inv)
+    offered = pd.Series(
+        np.where(hub["Warehouse"].isin(HUB_LENDS_ALL), total_inv, surplus),
+        index=hub.index)
+    stock = offered.groupby([hub["ItemNo"], hub["Warehouse"]]).sum()
     per_item = {}
     for (item, wh), qty in stock.items():
         if qty > 0:
@@ -538,7 +550,7 @@ def write_excel(df, buys, warns, out_path):
         "Location = physical stocking location. Warehouse = true warehouse after rollup: 07BK rolls into 01NJ and 13PA into 15MP; all other locations stand alone. Velocity, the warehouse slicer, and the warehouse chart all use the rolled-up Warehouse.",
         f"Velocity = ABC/D by cumulative share of revenue within each Region + Warehouse group: A = top {VEL_A:.0%} of revenue, B = next {VEL_B-VEL_A:.0%}, C = next {VEL_C-VEL_B:.0%}, D = last {1-VEL_C:.0%} (zero-revenue items are D). This computed Velocity drives the A-item safety stock. The export's companywide letter is kept as Source Velocity for reference only - it is one value per item, identical at every warehouse.",
         "Coverage: Oversea primary = 100 days; Domestic = 14 days. Safety stock (+21 days oversea / +7 domestic) is applied to items whose COMPUTED per-warehouse Velocity is A, so the buffer lands only where the SKU earns A-class revenue at that warehouse. Days = selling days, same basis as ADU.",
-        "Hub Avail = hub stock transferable to that row: total inventory (onhand + ondock + intransit + onorder) at the hubs it may draw on. Locations other than 01NJ and 15MP draw on BOTH hubs; 01NJ draws on 15MP only (its own stock is already in its Position); 15MP supplies the network and shows no hub availability. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
+        "Hub Avail = hub stock transferable to that row, from total inventory (onhand + ondock + intransit + onorder). 15MP lends all of its inventory (it is the source of supply); 01NJ lends only what it does not need for its own target, so it never gives stock away and then buys to replace it. Locations other than 01NJ and 15MP draw on BOTH hubs; 01NJ draws on 15MP only (its own stock is already in its Position); 15MP shows no hub availability. Hub Alloc nets that pool across locations (highest demand/day claims first) so one unit is never counted twice. Net Buy Qty = Buy Qty - Hub Alloc.",
         "Target Qty = ceil(Demand ADU x Target Days). Buy Qty = max(0, Target - (Onhand + OnDock + InTransit + OnOrder)).",
         "Florida reports one combined pipeline quantity (Qty_InPipeLine); it is carried in the Location_OnOrder column, with OnDock/InTransit zero.",
         "Excluded: patented items and companywide P-velocity items per KSI_Item_master (Florida also honors its export's own Patented flag).",
@@ -738,7 +750,7 @@ const COLS=[
 {h:'OnOrder',i:22,n:1,w:54},
 {h:"Pos'n",i:23,n:1,w:50,k:1,t:'On hand + on dock + in transit + on order'},
 {h:'Buy',i:24,n:1,w:46,k:1,t:'Gross buy = target - position'},
-{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Hub inventory (onhand + ondock + intransit + onorder) transferable to this row. Other locations draw on 01NJ + 15MP; 01NJ draws on 15MP only; 15MP shows none. Netted across locations, highest demand claims first. ✓ = fully coverable by transfer; (n) = only n claimable here.'},
+{h:'Hub avail',i:25,n:1,w:74,k:1,t:'Hub stock transferable to this row - 15MP lends its full inventory, 01NJ only what it does not need for its own target. Other locations draw on both hubs; 01NJ draws on 15MP only; 15MP shows none. Netted across locations, highest demand claims first. ✓ = fully coverable by transfer; (n) = only n claimable here.'},
 {h:'Net buy',i:27,n:1,w:56,k:1,t:'Buy after transferring the claimable hub stock'}];
 let allCols=true;   // false = key columns only (fits one screen)
 const shown=()=>allCols?COLS:COLS.filter(c=>c.k);

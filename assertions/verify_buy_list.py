@@ -162,9 +162,15 @@ check("R12c: zero- and negative-revenue items are classified D",
 
 # R13: hub pooling and netted allocation
 def surplus_of(rows):
-    """Stock a hub offers: its total inventory across all four buckets."""
-    return (rows["Location_Onhand"] + rows["Location_OnOnDock"]
-            + rows["Location_InTransit"] + rows["Location_OnOrder"])
+    """Stock a hub offers: total inventory for the lend-all hubs (15MP),
+    otherwise only what it does not need for its own target."""
+    total = (rows["Location_Onhand"] + rows["Location_OnOnDock"]
+             + rows["Location_InTransit"] + rows["Location_OnOrder"])
+    surplus = np.minimum(
+        (rows["Position"] - rows["Target Qty"]).clip(lower=0), total)
+    return pd.Series(
+        np.where(rows["Warehouse"].isin(b.HUB_LENDS_ALL), total, surplus),
+        index=rows.index)
 
 
 def other_pool(loc):
@@ -219,10 +225,17 @@ others = ne_rows[~ne_rows["Warehouse"].isin(b.HUBS)]
 check("R15c: locations other than 01NJ/15MP draw on both hubs",
       (others["Hub Avail"].fillna(0)
        == others["ItemNo"].map(both).fillna(0)).all())
-check("R15d: hub availability is total inventory, all four buckets",
-      (both == surplus_of(
-          df[(df["Region"] == "Northeast") & df["Warehouse"].isin(b.HUBS)])
-       .groupby(df.loc[(df["Region"] == "Northeast")
-                       & df["Warehouse"].isin(b.HUBS), "ItemNo"]).sum()).all())
+for h in b.HUBS:
+    rows = df[(df["Region"] == "Northeast") & (df["Warehouse"] == h)]
+    total = (rows["Location_Onhand"] + rows["Location_OnOnDock"]
+             + rows["Location_InTransit"] + rows["Location_OnOrder"])
+    if h in b.HUB_LENDS_ALL:
+        check(f"R15d {h}: lends its total inventory (all four buckets)",
+              (surplus_of(rows) == total).all())
+    else:
+        check(f"R15d {h}: lends nothing on rows short of its own target",
+              (surplus_of(rows[rows["Position"] < rows["Target Qty"]]) == 0).all())
+        check(f"R15e {h}: never lends more than it holds",
+              (surplus_of(rows) <= total + 1e-6).all())
 
 print(f"\n{passed} assertions passed.")
