@@ -162,12 +162,9 @@ check("R12c: zero- and negative-revenue items are classified D",
 
 # R13: hub pooling and netted allocation
 def surplus_of(rows):
-    """Stock a hub can spare: inventory above its own target, never more
-    than the inventory it actually holds."""
-    return np.minimum(
-        (rows["Position"] - rows["Target Qty"]).clip(lower=0),
-        rows["Location_Onhand"] + rows["Location_OnOnDock"]
-        + rows["Location_InTransit"] + rows["Location_OnOrder"])
+    """Stock a hub offers: its total inventory across all four buckets."""
+    return (rows["Location_Onhand"] + rows["Location_OnOnDock"]
+            + rows["Location_InTransit"] + rows["Location_OnOrder"])
 
 
 def other_pool(loc):
@@ -208,11 +205,24 @@ check("R14b: each feeder's demand lands entirely at its hub",
 check("R14c: non-stocking feeders raise no buy lines",
       not len(out[out["Location"].isin(b.NON_STOCKING)]))
 
-# R15: a hub short of its own target lends nothing
-for h in b.HUBS:
-    rows = df[(df["Region"] == "Northeast") & (df["Warehouse"] == h)]
-    short = rows[rows["Position"] < rows["Target Qty"]]
-    check(f"R15 {h}: rows short of own target offer zero surplus",
-          (surplus_of(short) == 0).all())
+# R15: who draws on whom
+ne_rows = df[df["Region"] == "Northeast"]
+check("R15a: 15MP shows no hub availability (it supplies the network)",
+      ne_rows.loc[ne_rows["Warehouse"] == "15MP", "Hub Avail"].isna().all()
+      and not len(out[out["Location"] == "15MP"].dropna(subset=["Hub Avail"])))
+check("R15b: 01NJ draws on 15MP only, never its own stock",
+      (ne_rows.loc[ne_rows["Warehouse"] == "01NJ", "Hub Avail"].fillna(0)
+       == ne_rows.loc[ne_rows["Warehouse"] == "01NJ", "ItemNo"]
+       .map(other_pool("01NJ")).fillna(0)).all())
+both = other_pool("__none__")   # every hub, nothing excluded
+others = ne_rows[~ne_rows["Warehouse"].isin(b.HUBS)]
+check("R15c: locations other than 01NJ/15MP draw on both hubs",
+      (others["Hub Avail"].fillna(0)
+       == others["ItemNo"].map(both).fillna(0)).all())
+check("R15d: hub availability is total inventory, all four buckets",
+      (both == surplus_of(
+          df[(df["Region"] == "Northeast") & df["Warehouse"].isin(b.HUBS)])
+       .groupby(df.loc[(df["Region"] == "Northeast")
+                       & df["Warehouse"].isin(b.HUBS), "ItemNo"]).sum()).all())
 
 print(f"\n{passed} assertions passed.")
