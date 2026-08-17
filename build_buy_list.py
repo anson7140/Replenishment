@@ -65,6 +65,9 @@ MASTER_CSV = os.path.join(HERE, "KSI_Item_master.csv")
 VENDOR_CSV = os.path.join(HERE, "Vendor and Type.csv")
 
 CAP_WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"]
+# Known to be out of the export on purpose - kept in CAP_WAREHOUSES so its
+# rows are still picked up if it ever returns, but not reported as missing.
+WAREHOUSES_NOT_EXPECTED = ["11MH"]
 
 # Northeast overflow hubs: their combined onhand+intransit can cover buys at
 # any other NE DC (netted across DCs - one unit serves one location).
@@ -442,8 +445,9 @@ def data_quality_warnings(df):
 
     # A Northeast warehouse absent from the export gets no buys at all, which
     # is invisible unless we say so.
+    present = set(df.loc[df["Region"] == "Northeast", "Warehouse"])
     missing = [w for w in CAP_WAREHOUSES
-               if w not in set(df.loc[df["Region"] == "Northeast", "Warehouse"])]
+               if w not in present and w not in WAREHOUSES_NOT_EXPECTED]
     if missing:
         warns.append(
             f"[Northeast] Warehouse(s) {', '.join(missing)} are not present in "
