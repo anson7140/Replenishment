@@ -64,6 +64,9 @@ FL_XLSX = os.path.join(HERE, "FL Raw.xlsx")
 MASTER_CSV = os.path.join(HERE, "KSI_Item_master.csv")
 VENDOR_CSV = os.path.join(HERE, "Vendor and Type.csv")
 
+# Raw exports arrive daily at 4am via Power Automate; warn past this age.
+RAW_STALE_DAYS = 2
+
 CAP_WAREHOUSES = ["01NJ", "03LF", "05RO", "07BK", "09SJ", "11MH", "13PA", "15MP"]
 # Known to be out of the export on purpose - kept in CAP_WAREHOUSES so its
 # rows are still picked up if it ever returns, but not reported as missing.
@@ -161,8 +164,29 @@ def _pick(raw, *names):
     raise KeyError(f"none of {names} found; file has: {list(raw.columns)}")
 
 
+def _read_export(path, *must_have):
+    """Read the data sheet of an export.
+
+    The sheet name has varied by delivery method - "Export" from a manual
+    Power BI download, "Sheet1" from the Power Automate flow - so pick the
+    first sheet that actually carries the expected columns rather than
+    trusting a name.
+    """
+    xl = pd.ExcelFile(path)
+    names = xl.sheet_names
+    for sheet in names:
+        cols = set(pd.read_excel(xl, sheet, nrows=0).columns)
+        if all(any(a in cols for a in aliases) for aliases in must_have):
+            return pd.read_excel(xl, sheet)
+    raise KeyError(
+        f"{os.path.basename(path)}: no sheet has the expected columns. "
+        f"Sheets: {names}. Looked for any of {must_have}.")
+
+
 def load_northeast(master):
-    raw = pd.read_excel(CAP_XLSX)
+    raw = _read_export(CAP_XLSX,
+                       ("Warehouse", "Location[WarehouseCode]"),
+                       ("ItemNo", "KSI Item[ItemNo]"))
     df = pd.DataFrame({
         "Warehouse": _pick(raw, "Warehouse", "Location[WarehouseCode]").astype(str).str.strip(),
         "ItemNo": _pick(raw, "ItemNo", "KSI Item[ItemNo]").astype(str).str.strip(),
@@ -210,7 +234,9 @@ def master_by_link(master):
 
 
 def load_florida(master):
-    raw = pd.read_excel(FL_XLSX, sheet_name="Export")
+    raw = _read_export(FL_XLSX,
+                       ("Location[DC]", "DC"),
+                       ("Item[ItemNum]", "ItemNum"))
     df = pd.DataFrame({
         "Warehouse": _pick(raw, "Location[DC]", "DC").astype(str).str.strip(),
         "ItemNo": _pick(raw, "Item[ItemNum]", "ItemNum").astype(str).str.strip(),
@@ -454,6 +480,22 @@ def build_all():
 
 def data_quality_warnings(df):
     warns = list(MASTER_NOTES)
+
+    # A Power Automate flow drops fresh exports here every day at 4am. If it
+    # fails, the build still succeeds on yesterday's file and looks fine - so
+    # say plainly how old the inputs are.
+    import datetime as _dt
+    for label, path in (("CAP Raw.xlsx", CAP_XLSX), ("FL Raw.xlsx", FL_XLSX)):
+        if not os.path.exists(path):
+            continue
+        age = (_dt.datetime.now()
+               - _dt.datetime.fromtimestamp(os.path.getmtime(path)))
+        if age.total_seconds() > RAW_STALE_DAYS * 86400:
+            warns.append(
+                f"{label} is {age.days} day(s) old (last updated "
+                f"{_dt.datetime.fromtimestamp(os.path.getmtime(path)):%b %d %H:%M})"
+                f" - the daily feed may have stopped, so these numbers are "
+                f"built on old data.")
 
     # A Northeast warehouse absent from the export gets no buys at all, which
     # is invisible unless we say so.
